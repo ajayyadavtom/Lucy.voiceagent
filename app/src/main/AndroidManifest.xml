@@ -1,25 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-	<!-- Core Permissions -->
 	<uses-permission android:name="android.permission.RECORD_AUDIO" />
 	<uses-permission android:name="android.permission.INTERNET" />
 	<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 	<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-	<uses-permission android:name="android.permission.BIND_DEVICE_ADMIN" />
+	<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+	<uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 	<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
-	<!-- Device admin permissions (shutdown, reboot, lock) -->
-	<uses-permission android:name="android.permission.REBOOT" />
-	<uses-permission android:name="android.permission.DEVICE_POWER" />
-
-	<!-- Optional: for accessibility automation -->
-	<uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE" />
-
-	<!-- Optional: for system alert window (debug overlay) -->
-	<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-
-	<!-- Queries for package visibility when launching apps by voice -->
 	<queries>
 		<intent>
 			<action android:name="android.intent.action.MAIN" />
@@ -35,7 +24,6 @@
 		android:theme="@style/Theme.LucyVoiceAgent"
 		android:usesCleartextTraffic="true">
 
-		<!-- Main Activity -->
 		<activity
 			android:name=".MainActivity"
 			android:exported="true">
@@ -45,14 +33,12 @@
 			</intent-filter>
 		</activity>
 
-		<!-- Foreground Service for voice listening -->
 		<service
 			android:name=".VoiceCommandService"
 			android:enabled="true"
 			android:exported="false"
 			android:foregroundServiceType="microphone" />
 
-		<!-- Accessibility Service (optional, for UI automation) -->
 		<service
 			android:name=".AccessibilityHelper"
 			android:enabled="false"
@@ -66,7 +52,6 @@
 				android:resource="@xml/accessibility_service_config" />
 		</service>
 
-		<!-- Device Admin Receiver (for device-owner actions) -->
 		<receiver
 			android:name=".DeviceAdminReceiver"
 			android:enabled="false"
