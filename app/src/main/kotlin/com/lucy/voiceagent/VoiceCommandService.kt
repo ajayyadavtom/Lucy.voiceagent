@@ -29,10 +29,8 @@ import org.vosk.LibVosk
 import org.vosk.LogLevel
 import org.vosk.Model
 import org.vosk.Recognizer
+import org.vosk.android.StorageService
 import timber.log.Timber
-import java.io.File
-import java.io.InputStream
-import java.util.zip.ZipInputStream
 
 /**
  * ForegroundService for multilingual (en-IN and te-IN) voice assistant supporting offline Vosk wake-word ("Lucy" / "లూసీ")
@@ -134,63 +132,59 @@ class VoiceCommandService : Service() {
 		getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, getNotification(text))
 	}
 
+	/**
+	 * Unpacks the uncompressed Vosk English-India model directory from assets into context.filesDir/model
+	 * using StorageService.unpack(), and initializes the Recognizer only inside the successful callback.
+	 */
 	private fun initializeEngine() {
-		serviceScope.launch(Dispatchers.IO) {
-			try {
-				val modelDir = filesDir.resolve("model_en_in")
-				if (!modelDir.exists() || modelDir.listFiles().isNullOrEmpty()) {
-					notifyStatus("Extracting en-IN voice model...")
-					extractModelFromAssets("vosk-model-small-en-in-0.4.zip", modelDir)
+		notifyStatus("Extracting voice model...")
+		Log.d("LucyVoice", "Starting StorageService.unpack for 'vosk-model-small-en-in-0.4'...")
+
+		StorageService.unpack(
+			this,
+			"vosk-model-small-en-in-0.4",
+			"model",
+			{ unpackedModel ->
+				model = unpackedModel
+				try {
+					recognizer = Recognizer(model, SAMPLE_RATE.toFloat())
+					Log.d("LucyVoice", "Vosk Recognizer initialized successfully from unpacked model")
+					notifyStatus("Listening for 'Lucy' / 'లూసీ'...")
+					startListeningLoop()
+				} catch (e: Exception) {
+					Log.e("LucyVoice", "Failed to create Vosk Recognizer", e)
+					notifyStatus("Recognizer Init Failed: ${e.message}")
 				}
-
-				val actualModelPath = getActualModelDir(modelDir)
-				model = Model(actualModelPath.absolutePath)
-				recognizer = Recognizer(model, SAMPLE_RATE.toFloat())
-
-				notifyStatus("Listening for 'Lucy' / 'లూసీ'...")
-				startListeningLoop()
-
-			} catch (e: Exception) {
-				Log.e("LucyVoice", "Failed to initialize voice engine", e)
-				notifyStatus("Init Failed: ${e.message}")
+			},
+			{ exception ->
+				Log.e("LucyVoice", "Failed to unpack Vosk model via StorageService, trying fallback asset path", exception)
+				tryFallbackUnpack()
 			}
-		}
+		)
 	}
 
-	private fun extractModelFromAssets(assetName: String, targetDir: File) {
-		targetDir.mkdirs()
-		val inputStream: InputStream = try {
-			assets.open("vosk/$assetName")
-		} catch (e: Exception) {
-			assets.open(assetName)
-		}
-
-		ZipInputStream(inputStream).use { zipInput ->
-			var entry = zipInput.nextEntry
-			while (entry != null) {
-				val outFile = File(targetDir, entry.name)
-				if (entry.isDirectory) {
-					outFile.mkdirs()
-				} else {
-					outFile.parentFile?.mkdirs()
-					outFile.outputStream().use { output ->
-						zipInput.copyTo(output)
-					}
+	private fun tryFallbackUnpack() {
+		StorageService.unpack(
+			this,
+			"vosk/vosk-model-small-en-in-0.4",
+			"model",
+			{ unpackedModel ->
+				model = unpackedModel
+				try {
+					recognizer = Recognizer(model, SAMPLE_RATE.toFloat())
+					Log.d("LucyVoice", "Vosk Recognizer initialized successfully from fallback path")
+					notifyStatus("Listening for 'Lucy' / 'లూసీ'...")
+					startListeningLoop()
+				} catch (e: Exception) {
+					Log.e("LucyVoice", "Failed to create Vosk Recognizer on fallback", e)
+					notifyStatus("Recognizer Init Failed: ${e.message}")
 				}
-				zipInput.closeEntry()
-				entry = zipInput.nextEntry
+			},
+			{ e ->
+				Log.e("LucyVoice", "Fallback model unpack also failed", e)
+				notifyStatus("Model Init Failed: ${e.message}")
 			}
-		}
-	}
-
-	private fun getActualModelDir(baseDir: File): File {
-		if (File(baseDir, "conf").exists() || File(baseDir, "am").exists()) return baseDir
-		baseDir.listFiles()?.forEach { child ->
-			if (child.isDirectory && (File(child, "conf").exists() || File(child, "am").exists())) {
-				return child
-			}
-		}
-		return baseDir
+		)
 	}
 
 	@SuppressLint("MissingPermission")
@@ -206,6 +200,7 @@ class VoiceCommandService : Service() {
 			val record = AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minBufferSize, 8192))
 			audioRecord = record
 			record.startRecording()
+			Log.d("LucyVoice", "AudioRecord successfully started recording")
 
 			while (isListening && serviceScope.isActive) {
 				val readSamples = record.read(buffer, 0, buffer.size)
@@ -275,5 +270,7 @@ class VoiceCommandService : Service() {
 		recognizer?.close()
 		model?.close()
 		serviceScope.cancel()
+		Log.d("LucyVoice", "VoiceCommandService destroyed")
+		Timber.d("VoiceCommandService destroyed")
 	}
 }
