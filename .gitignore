@@ -1,0 +1,32 @@
+# Gradle
+.gradle/
+build/
+*.apk
+*.aar
+*.jks
+*.keystore
+
+# Android Studio
+.idea/
+.DS_Store
+*.iml
+*.iws
+*.ipr
+local.properties
+
+# Build outputs
+/app/build/
+/app/release/
+
+# Models (large files, download on-demand)
+app/src/main/assets/vosk/model*.zip
+app/src/main/assets/speaker/*.tflite
+app/src/main/assets/silero/*.tflite
+
+# Sensitive keys
+*.key
+.env
+
+# IDE
+out/
+*.log

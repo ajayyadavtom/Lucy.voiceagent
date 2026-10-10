@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+	<string name="app_name">Lucy Voice Agent</string>
+	<string name="service_name">Voice Listening Service</string>
+	<string name="notification_title">Lucy Voice Agent</string>
+	<string name="notification_message">Listening for commands...</string>
+	<string name="notification_listening">Listening</string>
+	<string name="notification_processing">Processing...</string>
+	<string name="notification_error">Error</string>
+	<string name="action_stop">Stop</string>
+	<string name="action_start">Start</string>
+	<string name="permission_required">Permission Required</string>
+	<string name="record_audio_permission">This app needs microphone permission to listen for voice commands.</string>
+	<string name="permission_denied">Permission denied. App cannot run without microphone access.</string>
+	<string name="enrollment_prompt">Please speak 3-5 times to enroll your voice:</string>
+	<string name="enrollment_complete">Voice enrollment complete. You can now use voice commands.</string>
+	<string name="speaker_verification_failed">Voice not recognized. Permission denied.</string>
+	<string name="command_executed">Command executed</string>
+	<string name="command_failed">Command failed</string>
+</resources>
