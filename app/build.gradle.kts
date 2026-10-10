@@ -60,14 +60,6 @@ dependencies {
 	implementation("com.squareup.okhttp3:okhttp:4.11.0")
 	implementation("com.squareup.okhttp3:logging-interceptor:4.11.0")
 
-	// TensorFlow Lite
-	implementation("org.tensorflow:tensorflow-lite:2.14.0")
-	implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
-	implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
-
-	// Vosk (Offline STT)
-	implementation("com.alphacephei:vosk-android:0.3.47")
-
 	// Androidx Work & Foreground Service
 	implementation("androidx.work:work-runtime-ktx:2.8.1")
 	implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.2")

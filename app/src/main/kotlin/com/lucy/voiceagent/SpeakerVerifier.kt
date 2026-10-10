@@ -2,72 +2,32 @@ package com.lucy.voiceagent
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.tensorflow.lite.Interpreter
 import timber.log.Timber
-import java.io.File
-import java.nio.MappedByteBuffer
-import java.nio.channels.FileChannel
 import kotlin.math.sqrt
 
 /**
- * Speaker verification using TFLite speaker-embedding model.
- * Enrolls speaker voice and verifies against subsequent utterances.
+ * Speaker verification using acoustic spectral embeddings and cosine similarity.
+ * Pure Kotlin implementation without native C++ .so dependencies.
  */
 class SpeakerVerifier(private val context: Context) {
 
 	private val prefs: SharedPreferences = context.getSharedPreferences("speaker_verification", Context.MODE_PRIVATE)
-	private var interpreter: Interpreter? = null
 	private val embeddingThreshold = 0.65f // Cosine similarity threshold
 
 	companion object {
-		private const val MAX_RECORDING_DURATION_MS = 5000
-		private const val SAMPLE_RATE = 16000
-		private const val EMBEDDING_DIM = 192 // Common speaker embedding size
+		private const val EMBEDDING_DIM = 192
 		private const val PREF_ENROLLED = "pref_enrolled"
 		private const val PREF_EMBEDDING_1 = "pref_embedding_1"
 		private const val PREF_EMBEDDING_2 = "pref_embedding_2"
 		private const val PREF_EMBEDDING_3 = "pref_embedding_3"
 	}
 
-	init {
-		loadModel()
-	}
-
-	/**
-	 * Load the TFLite speaker-embedding model from assets.
-	 */
-	private fun loadModel() {
-		try {
-			val modelFile = File(context.filesDir, "speaker_verification.tflite")
-			if (modelFile.exists()) {
-				val fileInputStream = modelFile.inputStream()
-				val fileChannel = fileInputStream.channel
-				val mbb = fileChannel.map(FileChannel.MapMode.READ_ONLY, 0, fileChannel.size())
-				interpreter = Interpreter(mbb)
-				Timber.i("Speaker verification model loaded successfully")
-			} else {
-				Timber.w("Speaker verification model not found. Verification will be skipped.")
-			}
-		} catch (e: Exception) {
-			Timber.e(e, "Failed to load speaker verification model")
-		}
-	}
-
-	/**
-	 * Check if user has been enrolled.
-	 */
 	fun isEnrolled(): Boolean {
 		return prefs.getBoolean(PREF_ENROLLED, false)
 	}
 
-	/**
-	 * Enroll speaker: record 3 utterances and store embeddings.
-	 */
 	suspend fun enrollSpeaker(utterances: List<FloatArray>): Boolean {
 		return withContext(Dispatchers.Default) {
 			if (utterances.size < 3) {
@@ -76,7 +36,6 @@ class SpeakerVerifier(private val context: Context) {
 			}
 
 			return@withContext try {
-				// Store first 3 embeddings
 				saveEmbedding(utterances[0], PREF_EMBEDDING_1)
 				saveEmbedding(utterances[1], PREF_EMBEDDING_2)
 				saveEmbedding(utterances[2], PREF_EMBEDDING_3)
@@ -91,10 +50,6 @@ class SpeakerVerifier(private val context: Context) {
 		}
 	}
 
-	/**
-	 * Verify speaker against enrolled embeddings.
-	 * Returns true if voice matches with sufficient confidence.
-	 */
 	suspend fun verifySpeaker(voiceEmbedding: FloatArray): Boolean {
 		return withContext(Dispatchers.Default) {
 			if (!isEnrolled()) {
@@ -122,26 +77,11 @@ class SpeakerVerifier(private val context: Context) {
 		}
 	}
 
-	/**
-	 * Extract embedding from float audio samples.
-	 * Computes acoustic feature vector from PCM samples or runs TFLite inference if model exists.
-	 */
 	suspend fun extractEmbedding(audioSamples: FloatArray): FloatArray {
 		return withContext(Dispatchers.Default) {
 			val embedding = FloatArray(EMBEDDING_DIM)
 			if (audioSamples.isEmpty()) return@withContext embedding
 
-			if (interpreter != null) {
-				try {
-					val output = Array(1) { FloatArray(EMBEDDING_DIM) }
-					interpreter?.run(audioSamples, output)
-					return@withContext output[0]
-				} catch (e: Exception) {
-					Timber.e(e, "TFLite inference failed, using fallback feature vector")
-				}
-			}
-
-			// Generate acoustic feature embedding from PCM audio samples
 			val numSamples = audioSamples.size
 			var sumSquares = 0f
 			for (s in audioSamples) sumSquares += s * s
@@ -156,9 +96,6 @@ class SpeakerVerifier(private val context: Context) {
 		}
 	}
 
-	/**
-	 * Save embedding to shared preferences (base64 encoded).
-	 */
 	private fun saveEmbedding(embedding: FloatArray, prefKey: String) {
 		val encodedEmbedding = android.util.Base64.encodeToString(
 			embedding.toByteArray(),
@@ -167,9 +104,6 @@ class SpeakerVerifier(private val context: Context) {
 		prefs.edit().putString(prefKey, encodedEmbedding).apply()
 	}
 
-	/**
-	 * Load embedding from shared preferences.
-	 */
 	private fun loadEmbedding(prefKey: String): FloatArray? {
 		val encoded = prefs.getString(prefKey, null) ?: return null
 		return try {
@@ -181,9 +115,6 @@ class SpeakerVerifier(private val context: Context) {
 		}
 	}
 
-	/**
-	 * Compute cosine similarity between two embeddings [0, 1].
-	 */
 	private fun cosineSimilarity(a: FloatArray, b: FloatArray): Float {
 		if (a.size != b.size) return 0f
 
@@ -201,20 +132,15 @@ class SpeakerVerifier(private val context: Context) {
 		normB = sqrt(normB)
 
 		return if (normA * normB > 0) {
-			(dotProduct / (normA * normB) + 1) / 2  // Normalize to [0, 1]
+			(dotProduct / (normA * normB) + 1) / 2
 		} else {
 			0f
 		}
 	}
 
-	fun release() {
-		interpreter?.close()
-	}
+	fun release() {}
 }
 
-/**
- * Extension: convert FloatArray to ByteArray for serialization (simple byte packing).
- */
 private fun FloatArray.toByteArray(): ByteArray {
 	val bytes = ByteArray(size * Float.SIZE_BYTES)
 	val buffer = java.nio.ByteBuffer.wrap(bytes)
@@ -224,9 +150,6 @@ private fun FloatArray.toByteArray(): ByteArray {
 	return bytes
 }
 
-/**
- * Extension: convert ByteArray back to FloatArray.
- */
 private fun ByteArray.toFloatArray(): FloatArray {
 	val floats = FloatArray(size / Float.SIZE_BYTES)
 	val buffer = java.nio.ByteBuffer.wrap(this)

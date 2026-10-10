@@ -9,32 +9,36 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.ToneGenerator
 import android.os.Binder
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import org.json.JSONObject
-import org.vosk.LibVosk
-import org.vosk.LogLevel
-import org.vosk.Model
-import org.vosk.Recognizer
-import org.vosk.android.StorageService
+import kotlinx.coroutines.withContext
 import timber.log.Timber
+import java.io.File
+import java.io.FileOutputStream
+import java.util.Locale
 
 /**
- * ForegroundService for multilingual (en-IN and te-IN) voice assistant supporting offline Vosk wake-word ("Lucy" / "లూసీ")
- * and Sarvam AI REST API for high-accuracy speech transcription and command routing.
+ * Foreground Service using Android native SpeechRecognizer for lightweight offline wake-word ("lucy" / "లూసీ") detection.
+ * On wake word: plays an audio beep tone, records 5 seconds of audio via AudioRecord, uploads to Sarvam AI STT (`saaras:v4`),
+ * and executes command.
  */
 class VoiceCommandService : Service() {
 
@@ -45,20 +49,17 @@ class VoiceCommandService : Service() {
 	private val binder = LocalBinder()
 	private var statusListener: StatusListener? = null
 
-	private var recognizer: Recognizer? = null
-	private var model: Model? = null
-	private var audioRecord: AudioRecord? = null
-
-	@Volatile
-	private var isListening = false
-
+	private var speechRecognizer: SpeechRecognizer? = null
 	private val serviceScope = CoroutineScope(Dispatchers.Default + Job())
 	private val mainHandler = Handler(Looper.getMainLooper())
 	private lateinit var commandRouter: CommandRouter
 
+	@Volatile
+	private var isProcessingCommand = false
+
 	companion object {
 		private const val CHANNEL_ID = "VoiceCommandServiceChannel"
-		private const val NOTIFICATION_ID = 3001
+		private const val NOTIFICATION_ID = 4001
 		private const val SAMPLE_RATE = 16000
 	}
 
@@ -71,16 +72,14 @@ class VoiceCommandService : Service() {
 		Log.d("LucyVoice", "VoiceCommandService created")
 		commandRouter = CommandRouter(this)
 
-		LibVosk.setLogLevel(LogLevel.INFO)
 		createNotificationChannel()
-		startForeground(NOTIFICATION_ID, getNotification("Initializing multilingual engine..."))
+		startForeground(NOTIFICATION_ID, getNotification("Listening for 'Lucy'..."))
 
-		initializeEngine()
+		initNativeWakeWordRecognizer()
 	}
 
 	override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
 		if (intent?.action == "STOP_SERVICE") {
-			stopListening()
 			stopSelf()
 			return START_NOT_STICKY
 		}
@@ -106,7 +105,7 @@ class VoiceCommandService : Service() {
 		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
 			val channel = NotificationChannel(
 				CHANNEL_ID,
-				"Lucy Multilingual Assistant",
+				"Lucy Native Assistant",
 				NotificationManager.IMPORTANCE_LOW
 			)
 			getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
@@ -120,7 +119,7 @@ class VoiceCommandService : Service() {
 		)
 
 		return NotificationCompat.Builder(this, CHANNEL_ID)
-			.setContentTitle("Lucy Voice Assistant (en-IN / te-IN)")
+			.setContentTitle("Lucy Voice Agent")
 			.setContentText(text)
 			.setSmallIcon(android.R.drawable.ic_dialog_info)
 			.setOngoing(true)
@@ -133,144 +132,245 @@ class VoiceCommandService : Service() {
 	}
 
 	/**
-	 * Unpacks the uncompressed Vosk English-India model directory from assets into context.filesDir/model
-	 * using StorageService.unpack(), and initializes the Recognizer only inside the successful callback.
+	 * Initialize Android native SpeechRecognizer for lightweight background wake word listening.
 	 */
-	private fun initializeEngine() {
-		notifyStatus("Extracting voice model...")
-		Log.d("LucyVoice", "Starting StorageService.unpack for 'vosk-model-small-en-in-0.4'...")
+	private fun initNativeWakeWordRecognizer() {
+		mainHandler.post {
+			try {
+				if (SpeechRecognizer.isRecognitionAvailable(this)) {
+					speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+					speechRecognizer?.setRecognitionListener(object : RecognitionListener {
+						override fun onReadyForSpeech(params: Bundle?) {}
+						override fun onBeginningOfSpeech() {}
+						override fun onRmsChanged(rmsdB: Float) {}
+						override fun onBufferReceived(buffer: ByteArray?) {}
+						override fun onEndOfSpeech() {}
 
-		StorageService.unpack(
-			this,
-			"vosk-model-small-en-in-0.4",
-			"model",
-			{ unpackedModel ->
-				model = unpackedModel
-				try {
-					recognizer = Recognizer(model, SAMPLE_RATE.toFloat())
-					Log.d("LucyVoice", "Vosk Recognizer initialized successfully from unpacked model")
-					notifyStatus("Listening for 'Lucy' / 'లూసీ'...")
-					startListeningLoop()
-				} catch (e: Exception) {
-					Log.e("LucyVoice", "Failed to create Vosk Recognizer", e)
-					notifyStatus("Recognizer Init Failed: ${e.message}")
+						override fun onError(error: Int) {
+							Log.d("LucyVoice", "Native SpeechRecognizer error code: $error")
+							if (!isProcessingCommand) {
+								mainHandler.postDelayed({ restartWakeWordListening() }, 1000)
+							}
+						}
+
+						override fun onResults(results: Bundle?) {
+							val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+							if (!matches.isNullOrEmpty()) {
+								val heardText = matches[0].lowercase(Locale.ROOT)
+								Log.d("LucyVoice", "Native SpeechRecognizer heard: $heardText")
+
+								if (heardText.contains("lucy") || heardText.contains("లూసీ")) {
+									Log.d("LucyVoice", "Wake word matched! Triggering command capture...")
+									onWakeWordDetected(heardText)
+									return
+								}
+							}
+							if (!isProcessingCommand) {
+								restartWakeWordListening()
+							}
+						}
+
+						override fun onPartialResults(partialResults: Bundle?) {
+							val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+							if (!matches.isNullOrEmpty()) {
+								val partial = matches[0].lowercase(Locale.ROOT)
+								if (partial.contains("lucy") || partial.contains("లూసీ")) {
+									Log.d("LucyVoice", "Wake word detected in partial result: $partial")
+									speechRecognizer?.stopListening()
+									onWakeWordDetected(partial)
+								}
+							}
+						}
+
+						override fun onEvent(eventType: Int, params: Bundle?) {}
+					})
+
+					restartWakeWordListening()
+					notifyStatus("Listening for 'Lucy'...")
+				} else {
+					Log.e("LucyVoice", "Native SpeechRecognizer is not available on this device")
+					notifyStatus("SpeechRecognizer Unavailable")
 				}
-			},
-			{ exception ->
-				Log.e("LucyVoice", "Failed to unpack Vosk model via StorageService, trying fallback asset path", exception)
-				tryFallbackUnpack()
+			} catch (e: Exception) {
+				Log.e("LucyVoice", "Error initializing native SpeechRecognizer", e)
 			}
-		)
+		}
 	}
 
-	private fun tryFallbackUnpack() {
-		StorageService.unpack(
-			this,
-			"vosk/vosk-model-small-en-in-0.4",
-			"model",
-			{ unpackedModel ->
-				model = unpackedModel
-				try {
-					recognizer = Recognizer(model, SAMPLE_RATE.toFloat())
-					Log.d("LucyVoice", "Vosk Recognizer initialized successfully from fallback path")
-					notifyStatus("Listening for 'Lucy' / 'లూసీ'...")
-					startListeningLoop()
-				} catch (e: Exception) {
-					Log.e("LucyVoice", "Failed to create Vosk Recognizer on fallback", e)
-					notifyStatus("Recognizer Init Failed: ${e.message}")
-				}
-			},
-			{ e ->
-				Log.e("LucyVoice", "Fallback model unpack also failed", e)
-				notifyStatus("Model Init Failed: ${e.message}")
+	private fun restartWakeWordListening() {
+		if (isProcessingCommand) return
+		try {
+			val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+				putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+				putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+				putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
 			}
-		)
+			speechRecognizer?.startListening(intent)
+		} catch (e: Exception) {
+			Log.e("LucyVoice", "Error restarting native SpeechRecognizer", e)
+		}
+	}
+
+	/**
+	 * Triggered when wake word "lucy" or "లూసీ" is detected.
+	 */
+	private fun onWakeWordDetected(heardText: String) {
+		isProcessingCommand = true
+		speechRecognizer?.stopListening()
+
+		notifyStatus("Lucy Activated! Recording command...")
+
+		// Play alert beep tone
+		try {
+			val toneGen = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100)
+			toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
+		} catch (e: Exception) {
+			Log.e("LucyVoice", "Error playing beep tone", e)
+		}
+
+		// Record 5 seconds of audio and upload to Sarvam AI STT
+		captureAudioAndProcessSarvam()
 	}
 
 	@SuppressLint("MissingPermission")
-	private fun startListeningLoop() {
-		if (isListening) return
-		val rec = recognizer ?: return
-		isListening = true
+	private fun captureAudioAndProcessSarvam() {
+		serviceScope.launch(Dispatchers.IO) {
+			val totalSamples = SAMPLE_RATE * 5 // 5 seconds
+			val minBufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
 
-		val minBufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-		val buffer = ShortArray(4096)
+			val pcmBuffer = ByteArray(totalSamples * 2)
 
-		try {
-			val record = AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minBufferSize, 8192))
-			audioRecord = record
-			record.startRecording()
-			Log.d("LucyVoice", "AudioRecord successfully started recording")
+			try {
+				val record = AudioRecord(
+					MediaRecorder.AudioSource.MIC,
+					SAMPLE_RATE,
+					AudioFormat.CHANNEL_IN_MONO,
+					AudioFormat.ENCODING_PCM_16BIT,
+					maxOf(minBufferSize, 8192)
+				)
 
-			while (isListening && serviceScope.isActive) {
-				val readSamples = record.read(buffer, 0, buffer.size)
-				if (readSamples > 0) {
-					if (rec.acceptWaveForm(buffer, readSamples)) {
-						val jsonResult = rec.result
-						processVoskJson(jsonResult)
+				record.startRecording()
+				Log.d("LucyVoice", "AudioRecord started 5-second command recording...")
+
+				var readBytes = 0
+				while (readBytes < pcmBuffer.size && isProcessingCommand) {
+					val read = record.read(pcmBuffer, readBytes, pcmBuffer.size - readBytes)
+					if (read > 0) readBytes += read else break
+				}
+
+				try {
+					record.stop()
+				} catch (e: Exception) {
+					Timber.e(e, "Error stopping AudioRecord")
+				}
+				record.release()
+
+				val rawFile = File(cacheDir, "command_audio.raw")
+				val wavFile = File(cacheDir, "command_audio.wav")
+				FileOutputStream(rawFile).use { it.write(pcmBuffer, 0, readBytes) }
+
+				pcmToWavFile(rawFile, wavFile, sampleRate = SAMPLE_RATE)
+
+				Log.d("LucyVoice", "Uploading WAV audio to Sarvam STT API...")
+				notifyStatus("Transcribing via Sarvam AI...")
+
+				val transcript = SarvamApiClient.transcribeAudio(wavFile, "en-IN")
+
+				withContext(Dispatchers.Main) {
+					if (!transcript.isNullOrEmpty()) {
+						Log.d("LucyVoice", "Sarvam Transcribed: '$transcript'")
+						notifyStatus("Executing: $transcript")
+
+						val accessibilityService = AutomationAccessibilityService.instance
+						commandRouter.routeCommand(transcript, "en-IN", accessibilityService)
+					} else {
+						notifyStatus("Speech not recognized")
 					}
+
+					mainHandler.postDelayed({
+						isProcessingCommand = false
+						notifyStatus("Listening for 'Lucy'...")
+						restartWakeWordListening()
+					}, 3500)
 				}
-			}
-			record.stop()
-			record.release()
-			audioRecord = null
-		} catch (e: Exception) {
-			Log.e("LucyVoice", "Error in audio record loop", e)
-		} finally {
-			isListening = false
-		}
-	}
 
-	private fun processVoskJson(jsonResult: String?) {
-		if (jsonResult.isNullOrEmpty()) return
-		try {
-			val json = JSONObject(jsonResult)
-			val text = json.optString("text", "").lowercase().trim()
-			if (text.isEmpty()) return
-
-			Log.d("LucyVoice", "Heard text: $text")
-			notifyStatus("Heard: $text")
-
-			if (text.contains("lucy") || text.contains("లూసీ")) {
-				val keyword = if (text.contains("lucy")) "lucy" else "లూసీ"
-				val index = text.indexOf(keyword)
-				val command = text.substring(index + keyword.length).trim().removePrefix(",").trim()
-
-				Log.d("LucyVoice", "Wake word matched! Command: '$command'")
-				notifyStatus("Executing: $command")
-
+			} catch (e: Exception) {
+				Log.e("LucyVoice", "Error during command audio capture", e)
+				isProcessingCommand = false
 				mainHandler.post {
-					val accessibilityService = AutomationAccessibilityService.instance
-					commandRouter.routeCommand(command, "en-IN", accessibilityService)
+					notifyStatus("Listening for 'Lucy'...")
+					restartWakeWordListening()
 				}
-
-				mainHandler.postDelayed({
-					notifyStatus("Listening...")
-				}, 3500)
 			}
-		} catch (e: Exception) {
-			Log.e("LucyVoice", "Error processing Vosk json", e)
 		}
 	}
 
-	private fun stopListening() {
-		isListening = false
-		try {
-			audioRecord?.stop()
-			audioRecord?.release()
-			audioRecord = null
-		} catch (e: Exception) {
-			Timber.e(e, "Error stopping AudioRecord")
+	private fun pcmToWavFile(rawFile: File, wavFile: File, sampleRate: Int = 16000) {
+		val pcmData = rawFile.readBytes()
+		val totalAudioLen = pcmData.size.toLong()
+		val totalDataLen = totalAudioLen + 36
+		val channels = 1
+		val bitDepth = 16
+		val byteRate = (sampleRate * channels * bitDepth / 8).toLong()
+
+		val header = ByteArray(44)
+		header[0] = 'R'.code.toByte()
+		header[1] = 'I'.code.toByte()
+		header[2] = 'F'.code.toByte()
+		header[3] = 'F'.code.toByte()
+		header[4] = (totalDataLen and 0xff).toByte()
+		header[5] = ((totalDataLen shr 8) and 0xff).toByte()
+		header[6] = ((totalDataLen shr 16) and 0xff).toByte()
+		header[7] = ((totalDataLen shr 24) and 0xff).toByte()
+		header[8] = 'W'.code.toByte()
+		header[9] = 'A'.code.toByte()
+		header[10] = 'V'.code.toByte()
+		header[11] = 'E'.code.toByte()
+		header[12] = 'f'.code.toByte()
+		header[13] = 'm'.code.toByte()
+		header[14] = 't'.code.toByte()
+		header[15] = ' '.code.toByte()
+		header[16] = 16
+		header[17] = 0
+		header[18] = 0
+		header[19] = 0
+		header[20] = 1
+		header[21] = 0
+		header[22] = channels.toByte()
+		header[23] = 0
+		header[24] = (sampleRate and 0xff).toByte()
+		header[25] = ((sampleRate shr 8) and 0xff).toByte()
+		header[26] = ((sampleRate shr 16) and 0xff).toByte()
+		header[27] = ((sampleRate shr 24) and 0xff).toByte()
+		header[28] = (byteRate and 0xff).toByte()
+		header[29] = ((byteRate shr 8) and 0xff).toByte()
+		header[30] = ((byteRate shr 16) and 0xff).toByte()
+		header[31] = ((byteRate shr 24) and 0xff).toByte()
+		header[32] = (channels * bitDepth / 8).toByte()
+		header[33] = 0
+		header[34] = bitDepth.toByte()
+		header[35] = 0
+		header[36] = 'd'.code.toByte()
+		header[37] = 'a'.code.toByte()
+		header[38] = 't'.code.toByte()
+		header[39] = 'a'.code.toByte()
+		header[40] = (totalAudioLen and 0xff).toByte()
+		header[41] = ((totalAudioLen shr 8) and 0xff).toByte()
+		header[42] = ((totalAudioLen shr 16) and 0xff).toByte()
+		header[43] = ((totalAudioLen shr 24) and 0xff).toByte()
+
+		FileOutputStream(wavFile).use { out ->
+			out.write(header)
+			out.write(pcmData)
 		}
 	}
 
 	override fun onDestroy() {
 		super.onDestroy()
-		stopListening()
-		recognizer?.close()
-		model?.close()
+		isProcessingCommand = false
+		speechRecognizer?.destroy()
+		speechRecognizer = null
 		serviceScope.cancel()
 		Log.d("LucyVoice", "VoiceCommandService destroyed")
-		Timber.d("VoiceCommandService destroyed")
 	}
 }
