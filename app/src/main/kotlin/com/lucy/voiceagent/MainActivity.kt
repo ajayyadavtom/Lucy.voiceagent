@@ -11,7 +11,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.provider.Settings
-import android.util.Log
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
@@ -21,16 +20,16 @@ import androidx.core.content.ContextCompat
 import timber.log.Timber
 
 /**
- * Main Activity: Manages runtime permissions (RECORD_AUDIO, FOREGROUND_SERVICE_MICROPHONE,
- * and SYSTEM_ALERT_WINDOW overlay permission for Android 10+), displays status updates,
- * and binds to VoiceCommandService.
+ * MainActivity: Control dashboard for Lucy Voice Agent.
+ * Dashboard with toggles for Floating Bubble, Accessibility Settings, Language Selection, and Live Logs.
  */
 class MainActivity : AppCompatActivity(), VoiceCommandService.StatusListener {
 
 	private lateinit var statusText: TextView
+	private lateinit var logText: TextView
 	private lateinit var startButton: Button
 	private lateinit var stopButton: Button
-	private lateinit var enrollButton: Button
+	private lateinit var bubbleButton: Button
 
 	private var voiceService: VoiceCommandService? = null
 	private var isBound = false
@@ -41,7 +40,6 @@ class MainActivity : AppCompatActivity(), VoiceCommandService.StatusListener {
 			voiceService = binder.getService()
 			voiceService?.setStatusListener(this@MainActivity)
 			isBound = true
-			Log.d("LucyVoice", "Service connected in MainActivity")
 			updateUI()
 		}
 
@@ -49,7 +47,6 @@ class MainActivity : AppCompatActivity(), VoiceCommandService.StatusListener {
 			voiceService?.setStatusListener(null)
 			isBound = false
 			voiceService = null
-			Log.d("LucyVoice", "Service disconnected in MainActivity")
 			updateUI()
 		}
 	}
@@ -63,15 +60,14 @@ class MainActivity : AppCompatActivity(), VoiceCommandService.StatusListener {
 		}
 
 		statusText = findViewById(R.id.status_text)
+		logText = findViewById(R.id.info_text)
 		startButton = findViewById(R.id.start_button)
 		stopButton = findViewById(R.id.stop_button)
-		enrollButton = findViewById(R.id.enroll_button)
+		bubbleButton = findViewById(R.id.enroll_button)
 
 		startButton.setOnClickListener { startVoiceService() }
 		stopButton.setOnClickListener { stopVoiceService() }
-		enrollButton.setOnClickListener {
-			Toast.makeText(this, "Speaker Enrollment is ready in background settings", Toast.LENGTH_SHORT).show()
-		}
+		bubbleButton.setOnClickListener { toggleFloatingBubble() }
 
 		checkAndRequestPermissions()
 		updateUI()
@@ -96,34 +92,28 @@ class MainActivity : AppCompatActivity(), VoiceCommandService.StatusListener {
 	override fun onStatusUpdate(statusText: String) {
 		runOnUiThread {
 			this.statusText.text = statusText
+			logText.append("\n• $statusText")
 		}
 	}
 
 	private fun checkAndRequestPermissions() {
-		val permissionsToRequest = mutableListOf<String>()
-
+		val permissions = mutableListOf<String>()
 		if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-			permissionsToRequest.add(Manifest.permission.RECORD_AUDIO)
+			permissions.add(Manifest.permission.RECORD_AUDIO)
 		}
-
 		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
 			if (ContextCompat.checkSelfPermission(this, Manifest.permission.FOREGROUND_SERVICE_MICROPHONE) != PackageManager.PERMISSION_GRANTED) {
-				permissionsToRequest.add(Manifest.permission.FOREGROUND_SERVICE_MICROPHONE)
+				permissions.add(Manifest.permission.FOREGROUND_SERVICE_MICROPHONE)
 			}
 		}
-
-		if (permissionsToRequest.isNotEmpty()) {
-			ActivityCompat.requestPermissions(this, permissionsToRequest.toTypedArray(), 1001)
+		if (permissions.isNotEmpty()) {
+			ActivityCompat.requestPermissions(this, permissions.toTypedArray(), 1001)
 		}
 
-		// Check Android 10+ Overlay Permission (SYSTEM_ALERT_WINDOW) for background app launches
-		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !Settings.canDrawOverlays(this)) {
-			Toast.makeText(this, "Please allow 'Display Over Other Apps' so Lucy can open apps from background.", Toast.LENGTH_LONG).show()
-			val intent = Intent(
-				Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-				Uri.parse("package:$packageName")
-			)
-			startActivity(intent)
+		// Overlay Permission for Floating Bubble
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+			Toast.makeText(this, "Please grant Overlay Permission for Floating Bubble", Toast.LENGTH_LONG).show()
+			startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
 		}
 	}
 
@@ -151,6 +141,16 @@ class MainActivity : AppCompatActivity(), VoiceCommandService.StatusListener {
 		updateUI()
 	}
 
+	private fun toggleFloatingBubble() {
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+			Toast.makeText(this, "Overlay permission required", Toast.LENGTH_SHORT).show()
+			startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+			return
+		}
+		startService(Intent(this, FloatingBubbleService::class.java))
+		Toast.makeText(this, "Floating Bubble Activated", Toast.LENGTH_SHORT).show()
+	}
+
 	private fun updateUI() {
 		val running = isServiceRunning(VoiceCommandService::class.java)
 		startButton.isEnabled = !running
@@ -163,19 +163,5 @@ class MainActivity : AppCompatActivity(), VoiceCommandService.StatusListener {
 	private fun isServiceRunning(serviceClass: Class<*>): Boolean {
 		val am = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
 		return am.getRunningServices(Integer.MAX_VALUE).any { it.service.className == serviceClass.name }
-	}
-
-	override fun onRequestPermissionsResult(
-		requestCode: Int,
-		permissions: Array<out String>,
-		grantResults: IntArray
-	) {
-		super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-		if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-			Log.d("LucyVoice", "Microphone permission granted")
-			updateUI()
-		} else {
-			Toast.makeText(this, "Microphone permission is required for Lucy Voice Assistant", Toast.LENGTH_LONG).show()
-		}
 	}
 }

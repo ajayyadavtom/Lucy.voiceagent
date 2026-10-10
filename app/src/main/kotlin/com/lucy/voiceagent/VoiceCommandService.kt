@@ -241,7 +241,7 @@ class VoiceCommandService : Service() {
 
 				mainHandler.post {
 					val accessibilityService = AutomationAccessibilityService.instance
-					commandRouter.routeCommand(command, accessibilityService)
+					commandRouter.routeCommand(command, "en-IN", accessibilityService)
 				}
 
 				mainHandler.postDelayed({

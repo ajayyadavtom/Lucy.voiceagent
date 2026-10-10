@@ -15,6 +15,11 @@
 			<action android:name="android.intent.action.MAIN" />
 			<category android:name="android.intent.category.LAUNCHER" />
 		</intent>
+		<package android:name="com.whatsapp" />
+		<package android:name="com.instagram.android" />
+		<package android:name="com.google.android.youtube" />
+		<package android:name="com.spotify.music" />
+		<package android:name="com.android.chrome" />
 	</queries>
 
 	<application
