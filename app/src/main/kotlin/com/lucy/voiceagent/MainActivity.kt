@@ -21,7 +21,7 @@ import timber.log.Timber
 
 /**
  * MainActivity: Control dashboard for Lucy Voice Agent.
- * Dashboard with toggles for Floating Bubble, Accessibility Settings, Language Selection, and Live Logs.
+ * Handles permissions, service controls, overlay settings, and live status logs.
  */
 class MainActivity : AppCompatActivity(), VoiceCommandService.StatusListener {
 

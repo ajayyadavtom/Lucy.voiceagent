@@ -131,9 +131,6 @@ class VoiceCommandService : Service() {
 		getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, getNotification(text))
 	}
 
-	/**
-	 * Initialize Android native SpeechRecognizer for lightweight background wake word listening.
-	 */
 	private fun initNativeWakeWordRecognizer() {
 		mainHandler.post {
 			try {
@@ -211,16 +208,12 @@ class VoiceCommandService : Service() {
 		}
 	}
 
-	/**
-	 * Triggered when wake word "lucy" or "లూసీ" is detected.
-	 */
 	private fun onWakeWordDetected(heardText: String) {
 		isProcessingCommand = true
 		speechRecognizer?.stopListening()
 
 		notifyStatus("Lucy Activated! Recording command...")
 
-		// Play alert beep tone
 		try {
 			val toneGen = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100)
 			toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
@@ -228,14 +221,13 @@ class VoiceCommandService : Service() {
 			Log.e("LucyVoice", "Error playing beep tone", e)
 		}
 
-		// Record 5 seconds of audio and upload to Sarvam AI STT
 		captureAudioAndProcessSarvam()
 	}
 
 	@SuppressLint("MissingPermission")
 	private fun captureAudioAndProcessSarvam() {
 		serviceScope.launch(Dispatchers.IO) {
-			val totalSamples = SAMPLE_RATE * 5 // 5 seconds
+			val totalSamples = SAMPLE_RATE * 5
 			val minBufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
 
 			val pcmBuffer = ByteArray(totalSamples * 2)

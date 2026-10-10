@@ -39,14 +39,12 @@
 			</intent-filter>
 		</activity>
 
-		<!-- Foreground Service for voice listening -->
 		<service
 			android:name=".VoiceCommandService"
 			android:enabled="true"
 			android:exported="false"
 			android:foregroundServiceType="microphone" />
 
-		<!-- Quick Settings Tile Service -->
 		<service
 			android:name=".LucyTileService"
 			android:exported="true"
@@ -58,7 +56,6 @@
 			</intent-filter>
 		</service>
 
-		<!-- Automation Accessibility Service -->
 		<service
 			android:name=".AutomationAccessibilityService"
 			android:enabled="true"
@@ -72,7 +69,6 @@
 				android:resource="@xml/accessibility_service_config" />
 		</service>
 
-		<!-- Floating Bubble Overlay Service -->
 		<service
 			android:name=".FloatingBubbleService"
 			android:enabled="true"
