@@ -4,12 +4,13 @@ import android.content.Context
 import android.content.Intent
 import android.speech.tts.TextToSpeech
 import android.util.Log
+import android.view.KeyEvent
 import timber.log.Timber
 import java.util.Locale
 
 /**
  * VoiceCommandExecutor: Maps voice commands to Android Intents with TextToSpeech audio feedback
- * and FLAG_ACTIVITY_NEW_TASK for launching apps from background services.
+ * and FLAG_ACTIVITY_NEW_TASK or FLAG_ACTIVITY_CLEAR_TOP for launching apps from background services.
  */
 class VoiceCommandExecutor {
 
@@ -17,8 +18,8 @@ class VoiceCommandExecutor {
 
 	fun execute(context: Context, command: String) {
 		val text = command.lowercase().trim()
-		Log.d("LucyVoice", "VoiceCommandExecutor executing command: $text")
-		Timber.d("VoiceCommandExecutor executing command: $text")
+		Log.d("LucyVoice", "VoiceCommandExecutor executing command: '$text'")
+		Timber.d("VoiceCommandExecutor executing command: '$text'")
 
 		if (tts == null) {
 			tts = TextToSpeech(context.applicationContext) { status ->
@@ -41,6 +42,8 @@ class VoiceCommandExecutor {
 			command.contains("chrome") -> "Chrome"
 			command.contains("gmail") -> "Gmail"
 			command.contains("maps") -> "Google Maps"
+			command.contains("calculator") -> "Calculator"
+			command.contains("settings") -> "Settings"
 			else -> command.removePrefix("open").trim().replaceFirstChar { it.uppercase() }
 		}
 
@@ -72,7 +75,10 @@ class VoiceCommandExecutor {
 					intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
 					context.startActivity(intent)
 					Log.d("LucyVoice", "Successfully launched package: $packageName")
+					Timber.i("Successfully launched package: $packageName")
 					return
+				} else {
+					Log.w("LucyVoice", "Launch intent returned null for package: $packageName")
 				}
 			} catch (e: Exception) {
 				Log.e("LucyVoice", "Failed to launch package: $packageName", e)
@@ -80,8 +86,8 @@ class VoiceCommandExecutor {
 		}
 
 		// Generic fallback: Query installed applications
-		if (command.startsWith("open ")) {
-			val query = command.removePrefix("open ").trim()
+		if (command.contains("open") || command.isNotBlank()) {
+			val query = command.removePrefix("open").trim()
 			launchAppByQuery(context, query)
 		}
 	}
@@ -103,6 +109,7 @@ class VoiceCommandExecutor {
 						intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
 						context.startActivity(intent)
 						Log.d("LucyVoice", "Successfully launched app by query '$query': $pkg")
+						Timber.i("Successfully launched app by query '$query': $pkg")
 						return
 					}
 				}
