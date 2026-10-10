@@ -49,7 +49,7 @@
 		android:id="@+id/info_text"
 		android:layout_width="wrap_content"
 		android:layout_height="wrap_content"
-		android:text="Tips:\n• Say 'open spotify', 'open chrome', 'open gmail'\n• Say 'play', 'pause', 'next', 'previous'\n• Device owner required for shutdown/reboot"
+		android:text="Tips:\n• Say 'Lucy open Spotify', 'Lucy open YouTube', 'Lucy open Settings'\n• Say 'Lucy play', 'Lucy pause', 'Lucy next', 'Lucy previous'\n• Device owner required for shutdown/reboot"
 		android:textSize="12sp"
 		android:gravity="center" />
 

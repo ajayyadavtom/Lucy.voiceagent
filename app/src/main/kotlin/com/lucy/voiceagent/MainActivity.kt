@@ -1,16 +1,28 @@
 package com.lucy.voiceagent
 
+import android.Manifest
+import android.annotation.SuppressLint
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import timber.log.Timber
 
 /**
@@ -23,6 +35,7 @@ class MainActivity : AppCompatActivity() {
 	private lateinit var stopButton: Button
 	private lateinit var enrollButton: Button
 
+	private lateinit var speakerVerifier: SpeakerVerifier
 	private var voiceService: VoiceCommandService? = null
 	private var isBound = false
 
@@ -46,6 +59,8 @@ class MainActivity : AppCompatActivity() {
 	override fun onCreate(savedInstanceState: Bundle?) {
 		super.onCreate(savedInstanceState)
 		setContentView(R.layout.activity_main)
+
+		speakerVerifier = SpeakerVerifier(this)
 
 		// Initialize Timber logging
 		if (BuildConfig.DEBUG) {
@@ -96,7 +111,7 @@ class MainActivity : AppCompatActivity() {
 		} else {
 			startService(Intent(this, VoiceCommandService::class.java))
 		}
-		Toast.makeText(this, "Voice agent started", Toast.LENGTH_SHORT).show()
+		Toast.makeText(this, "Lucy Voice Agent started", Toast.LENGTH_SHORT).show()
 		updateUI()
 	}
 
@@ -105,38 +120,136 @@ class MainActivity : AppCompatActivity() {
 	 */
 	private fun stopVoiceService() {
 		stopService(Intent(this, VoiceCommandService::class.java))
-		Toast.makeText(this, "Voice agent stopped", Toast.LENGTH_SHORT).show()
+		Toast.makeText(this, "Lucy Voice Agent stopped", Toast.LENGTH_SHORT).show()
 		updateUI()
 	}
 
 	/**
-	 * Enroll speaker (placeholder for full enrollment UI).
+	 * Enroll speaker voice profile through a 3-utterance recording dialog.
 	 */
 	private fun enrollSpeaker() {
-		Toast.makeText(this, "Speaker enrollment will be implemented", Toast.LENGTH_LONG).show()
-		Timber.i("Enroll speaker clicked - TODO: implement enrollment UI")
+		if (!PermissionHelper.hasRecordAudioPermission(this)) {
+			PermissionHelper.requestRecordAudioPermission(this)
+			return
+		}
 
-		// TODO: Implement enrollment flow:
-		// 1. Record 3-5 utterances (e.g., "voice agent")
-		// 2. Extract embeddings via TFLite
-		// 3. Store embeddings securely
-		// 4. Update SpeakerVerifier.enrollSpeaker()
+		val utteranceEmbeddings = mutableListOf<FloatArray>()
+		var currentStep = 1
+
+		val dialogBuilder = AlertDialog.Builder(this)
+		dialogBuilder.setTitle("Enroll Voice for Lucy")
+		dialogBuilder.setMessage("Step $currentStep of 3: Say 'Hey Lucy' clearly into your microphone when you tap Record.")
+
+		dialogBuilder.setPositiveButton("Record Sample $currentStep", null)
+		dialogBuilder.setNegativeButton("Cancel") { dialog, _ ->
+			dialog.dismiss()
+		}
+
+		val dialog = dialogBuilder.create()
+		dialog.show()
+
+		val recordButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+		recordButton.setOnClickListener {
+			recordButton.isEnabled = false
+			dialog.setMessage("Recording... Say 'Hey Lucy' now!")
+
+			recordAudioUtterance { floatSamples ->
+				lifecycleScope.launch {
+					val embedding = speakerVerifier.extractEmbedding(floatSamples)
+					utteranceEmbeddings.add(embedding)
+
+					currentStep++
+					if (currentStep <= 3) {
+						dialog.setMessage("Step $currentStep of 3: Great! Say 'Hey Lucy' again.")
+						recordButton.text = "Record Sample $currentStep"
+						recordButton.isEnabled = true
+					} else {
+						dialog.setMessage("Saving voice embeddings...")
+						val success = speakerVerifier.enrollSpeaker(utteranceEmbeddings)
+						dialog.dismiss()
+						if (success) {
+							Toast.makeText(this@MainActivity, "Voice enrollment successful! Lucy now recognizes your voice.", Toast.LENGTH_LONG).show()
+							updateUI()
+						} else {
+							Toast.makeText(this@MainActivity, "Enrollment failed. Please try again.", Toast.LENGTH_SHORT).show()
+						}
+					}
+				}
+			}
+		}
 	}
 
 	/**
-	 * Update UI based on service state.
+	 * Record 2 seconds of audio from microphone and return FloatArray PCM samples.
+	 */
+	@SuppressLint("MissingPermission")
+	private fun recordAudioUtterance(onComplete: (FloatArray) -> Unit) {
+		val sampleRate = 16000
+		val channelConfig = AudioFormat.CHANNEL_IN_MONO
+		val audioFormat = AudioFormat.ENCODING_PCM_16BIT
+		val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
+		val bufferSize = maxOf(minBufferSize, sampleRate * 2 * 2)
+
+		if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+			Toast.makeText(this, "Microphone permission required", Toast.LENGTH_SHORT).show()
+			return
+		}
+
+		val audioRecord = AudioRecord(
+			MediaRecorder.AudioSource.MIC,
+			sampleRate,
+			channelConfig,
+			audioFormat,
+			bufferSize
+		)
+
+		val totalSamples = sampleRate * 2 // 2 seconds
+		val audioBuffer = ShortArray(totalSamples)
+		audioRecord.startRecording()
+
+		lifecycleScope.launch(Dispatchers.IO) {
+			var readCount = 0
+			while (readCount < totalSamples) {
+				val read = audioRecord.read(audioBuffer, readCount, totalSamples - readCount)
+				if (read > 0) {
+					readCount += read
+				} else {
+					break
+				}
+			}
+			try {
+				audioRecord.stop()
+			} catch (e: Exception) {
+				Timber.e(e, "Error stopping AudioRecord")
+			}
+			audioRecord.release()
+
+			val floatSamples = FloatArray(readCount) { i -> audioBuffer[i] / 32768.0f }
+			withContext(Dispatchers.Main) {
+				onComplete(floatSamples)
+			}
+		}
+	}
+
+	/**
+	 * Update UI based on service state and enrollment status.
 	 */
 	private fun updateUI() {
 		val serviceRunning = isServiceRunning(VoiceCommandService::class.java)
 		statusText.text = if (serviceRunning) {
-			"Status: Voice Agent Running"
+			"Status: Lucy Voice Agent Running"
 		} else {
-			"Status: Voice Agent Stopped"
+			"Status: Lucy Voice Agent Stopped"
 		}
 
 		startButton.isEnabled = !serviceRunning
 		stopButton.isEnabled = serviceRunning
-		enrollButton.isEnabled = true
+
+		if (::speakerVerifier.isInitialized && speakerVerifier.isEnrolled()) {
+			enrollButton.text = "Re-enroll Speaker (Enrolled ✓)"
+		} else {
+			enrollButton.text = "Enroll Speaker"
+		}
 	}
 
 	/**
@@ -154,7 +267,7 @@ class MainActivity : AppCompatActivity() {
 		grantResults: IntArray
 	) {
 		super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-		if (grantResults.isNotEmpty() && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+		if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
 			Timber.i("Microphone permission granted")
 			updateUI()
 		} else {

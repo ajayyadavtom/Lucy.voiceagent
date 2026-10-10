@@ -1,7 +1,7 @@
 // Top-level build file
 plugins {
-	id("com.android.application") version "8.13.2" apply false
-	kotlin("android") version "1.8.10" apply false
+	id("com.android.application") version "9.4.1" apply false
+	kotlin("android") version "2.2.10" apply false
 }
 
 ext {

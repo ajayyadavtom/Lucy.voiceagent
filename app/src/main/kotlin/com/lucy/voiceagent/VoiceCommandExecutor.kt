@@ -7,8 +7,8 @@ import android.view.KeyEvent
 import timber.log.Timber
 
 /**
- * Safe intent mapper: routes recognized speech to a whitelist of allowed actions.
- * No arbitrary command execution. All actions are pre-approved.
+ * Safe intent mapper: routes recognized speech to allowed actions or app launches.
+ * Supports wake word prefixes like "Lucy", "Hey Lucy", "OK Lucy".
  */
 class VoiceCommandExecutor(private val context: Context) {
 
@@ -19,46 +19,86 @@ class VoiceCommandExecutor(private val context: Context) {
 	 * Returns true if command was recognized and executed.
 	 */
 	fun executeCommand(voiceText: String, onRequiresConfirmation: ((String) -> Unit)? = null): Boolean {
-		val normalizedText = voiceText.lowercase().trim()
+		var text = voiceText.lowercase().trim()
 
-		Timber.d("Executing command: $normalizedText")
+		// Strip common wake words / prefixes ("hey lucy", "ok lucy", "hello lucy", "lucy")
+		val wakeWords = listOf("hey lucy", "ok lucy", "hello lucy", "lucy")
+		for (wakeWord in wakeWords) {
+			if (text.startsWith(wakeWord)) {
+				text = text.substring(wakeWord.length).trim()
+				break
+			}
+		}
+
+		Timber.d("Executing processed command: '$text' (original: '$voiceText')")
 
 		return when {
 			// App launching commands
-			normalizedText.contains("open spotify") -> launchApp("com.spotify.music")
-			normalizedText.contains("open chrome") -> launchApp("com.android.chrome")
-			normalizedText.contains("open gmail") -> launchApp("com.google.android.gm")
-			normalizedText.contains("open maps") -> launchApp("com.google.android.apps.maps")
-			normalizedText.contains("open calculator") -> launchApp("com.android.calculator2")
-			normalizedText.contains("open settings") -> launchApp("com.android.settings")
-
-			// Media control commands
-			normalizedText.contains("play") -> sendMediaKeyEvent(KeyEvent.KEYCODE_MEDIA_PLAY)
-			normalizedText.contains("pause") -> sendMediaKeyEvent(KeyEvent.KEYCODE_MEDIA_PAUSE)
-			normalizedText.contains("next") -> sendMediaKeyEvent(KeyEvent.KEYCODE_MEDIA_NEXT)
-			normalizedText.contains("previous") || normalizedText.contains("prev") -> sendMediaKeyEvent(KeyEvent.KEYCODE_MEDIA_PREVIOUS)
-
-			// Sensitive commands (require confirmation/verification)
-			normalizedText.contains("shutdown") -> {
-				onRequiresConfirmation?.invoke("confirm shutdown")
-				true // Handled by callback; executor does not call device admin directly
+			text.contains("open spotify") -> launchApp("com.spotify.music")
+			text.contains("open chrome") -> launchApp("com.android.chrome")
+			text.contains("open gmail") -> launchApp("com.google.android.gm")
+			text.contains("open maps") -> launchApp("com.google.android.apps.maps")
+			text.contains("open calculator") -> launchApp("com.android.calculator2")
+			text.contains("open settings") -> launchApp("com.android.settings")
+			text.startsWith("open ") -> {
+				val appQuery = text.removePrefix("open ").trim()
+				launchAppByQuery(appQuery)
 			}
 
-			normalizedText.contains("reboot") || normalizedText.contains("restart") -> {
+			// Media control commands
+			text.contains("play") -> sendMediaKeyEvent(KeyEvent.KEYCODE_MEDIA_PLAY)
+			text.contains("pause") -> sendMediaKeyEvent(KeyEvent.KEYCODE_MEDIA_PAUSE)
+			text.contains("next") -> sendMediaKeyEvent(KeyEvent.KEYCODE_MEDIA_NEXT)
+			text.contains("previous") || text.contains("prev") -> sendMediaKeyEvent(KeyEvent.KEYCODE_MEDIA_PREVIOUS)
+
+			// Sensitive commands (require confirmation/verification)
+			text.contains("shutdown") -> {
+				onRequiresConfirmation?.invoke("confirm shutdown")
+				true
+			}
+
+			text.contains("reboot") || text.contains("restart") -> {
 				onRequiresConfirmation?.invoke("confirm reboot")
 				true
 			}
 
-			normalizedText.contains("lock") || normalizedText.contains("lock screen") -> {
+			text.contains("lock") || text.contains("lock screen") -> {
 				onRequiresConfirmation?.invoke("confirm lock")
 				true
 			}
 
 			// Unknown command
 			else -> {
-				Timber.w("Unknown command: $normalizedText")
+				Timber.w("Unknown command: $text")
 				false
 			}
+		}
+	}
+
+	/**
+	 * Search installed apps dynamically by query (e.g., "youtube", "instagram", "camera") and launch.
+	 */
+	private fun launchAppByQuery(query: String): Boolean {
+		if (query.isBlank()) return false
+		try {
+			val pm = context.packageManager
+			val mainIntent = Intent(Intent.ACTION_MAIN, null).apply {
+				addCategory(Intent.CATEGORY_LAUNCHER)
+			}
+			val resolveInfos = pm.queryIntentActivities(mainIntent, 0)
+			for (info in resolveInfos) {
+				val appLabel = info.loadLabel(pm).toString().lowercase()
+				if (appLabel.contains(query) || query.contains(appLabel)) {
+					val packageName = info.activityInfo.packageName
+					Timber.i("Found app matching query '$query': $packageName ($appLabel)")
+					return launchApp(packageName)
+				}
+			}
+			Timber.w("No installed app found matching query: '$query'")
+			return false
+		} catch (e: Exception) {
+			Timber.e(e, "Error finding app by query: '$query'")
+			return false
 		}
 	}
 
