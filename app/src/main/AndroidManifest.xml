@@ -3,6 +3,7 @@
 
 	<uses-permission android:name="android.permission.RECORD_AUDIO" />
 	<uses-permission android:name="android.permission.INTERNET" />
+	<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 	<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 	<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 	<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
@@ -33,11 +34,44 @@
 			</intent-filter>
 		</activity>
 
+		<!-- Foreground Service for voice listening -->
 		<service
 			android:name=".VoiceCommandService"
 			android:enabled="true"
 			android:exported="false"
 			android:foregroundServiceType="microphone" />
+
+		<!-- Quick Settings Tile Service -->
+		<service
+			android:name=".LucyTileService"
+			android:exported="true"
+			android:icon="@drawable/ic_launcher"
+			android:label="Lucy Voice"
+			android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+			<intent-filter>
+				<action android:name="android.service.quicksettings.action.QS_TILE_SERVICE" />
+			</intent-filter>
+		</service>
+
+		<!-- Automation Accessibility Service -->
+		<service
+			android:name=".AutomationAccessibilityService"
+			android:enabled="true"
+			android:exported="false"
+			android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+			<intent-filter>
+				<action android:name="android.accessibilityservice.AccessibilityService" />
+			</intent-filter>
+			<meta-data
+				android:name="android.accessibilityservice"
+				android:resource="@xml/accessibility_service_config" />
+		</service>
+
+		<!-- Floating Bubble Overlay Service -->
+		<service
+			android:name=".FloatingBubbleService"
+			android:enabled="true"
+			android:exported="false" />
 
 		<service
 			android:name=".AccessibilityHelper"

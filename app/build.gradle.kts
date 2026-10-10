@@ -57,6 +57,12 @@ dependencies {
 	// Vosk (Offline STT) - Free, open-source
 	implementation("com.alphacephei:vosk-android:0.3.47")
 
+	// Retrofit & OkHttp for Sarvam AI API
+	implementation("com.squareup.retrofit2:retrofit:2.9.0")
+	implementation("com.squareup.retrofit2:converter-gson:2.9.0")
+	implementation("com.squareup.okhttp3:okhttp:4.11.0")
+	implementation("com.squareup.okhttp3:logging-interceptor:4.11.0")
+
 	// TensorFlow Lite (for speaker verification & Silero VAD)
 	implementation("org.tensorflow:tensorflow-lite:2.14.0")
 	implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")

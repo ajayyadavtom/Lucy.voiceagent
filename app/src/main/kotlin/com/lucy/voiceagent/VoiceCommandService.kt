@@ -24,7 +24,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.vosk.LibVosk
 import org.vosk.LogLevel
@@ -36,10 +35,8 @@ import java.io.InputStream
 import java.util.zip.ZipInputStream
 
 /**
- * Foreground Service for continuous voice listening and command parsing.
- * Extracts the Vosk model from assets/vosk/model-en-us.zip into context.filesDir/model,
- * streams microphone PCM audio via AudioRecord directly into Vosk Recognizer,
- * parses JSON recognition results, detects "lucy", and invokes VoiceCommandExecutor.
+ * ForegroundService for multilingual (en-IN and te-IN) voice assistant supporting offline Vosk wake-word ("Lucy" / "లూసీ")
+ * and Sarvam AI REST API for high-accuracy speech transcription and command routing.
  */
 class VoiceCommandService : Service() {
 
@@ -59,11 +56,11 @@ class VoiceCommandService : Service() {
 
 	private val serviceScope = CoroutineScope(Dispatchers.Default + Job())
 	private val mainHandler = Handler(Looper.getMainLooper())
-	private val executor = VoiceCommandExecutor()
+	private lateinit var commandRouter: CommandRouter
 
 	companion object {
 		private const val CHANNEL_ID = "VoiceCommandServiceChannel"
-		private const val NOTIFICATION_ID = 2001
+		private const val NOTIFICATION_ID = 3001
 		private const val SAMPLE_RATE = 16000
 	}
 
@@ -73,14 +70,14 @@ class VoiceCommandService : Service() {
 
 	override fun onCreate() {
 		super.onCreate()
-		Timber.d("VoiceCommandService created")
 		Log.d("LucyVoice", "VoiceCommandService created")
+		commandRouter = CommandRouter(this)
 
 		LibVosk.setLogLevel(LogLevel.INFO)
 		createNotificationChannel()
-		startForeground(NOTIFICATION_ID, getNotification("Initializing..."))
+		startForeground(NOTIFICATION_ID, getNotification("Initializing multilingual engine..."))
 
-		initializePipeline()
+		initializeEngine()
 	}
 
 	override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -111,11 +108,10 @@ class VoiceCommandService : Service() {
 		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
 			val channel = NotificationChannel(
 				CHANNEL_ID,
-				"Lucy Voice Assistant Service",
+				"Lucy Multilingual Assistant",
 				NotificationManager.IMPORTANCE_LOW
 			)
-			val manager = getSystemService(NotificationManager::class.java)
-			manager?.createNotificationChannel(channel)
+			getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
 		}
 	}
 
@@ -126,7 +122,7 @@ class VoiceCommandService : Service() {
 		)
 
 		return NotificationCompat.Builder(this, CHANNEL_ID)
-			.setContentTitle("Lucy Voice Agent")
+			.setContentTitle("Lucy Voice Assistant (en-IN / te-IN)")
 			.setContentText(text)
 			.setSmallIcon(android.R.drawable.ic_dialog_info)
 			.setOngoing(true)
@@ -135,58 +131,38 @@ class VoiceCommandService : Service() {
 	}
 
 	private fun updateNotification(text: String) {
-		val manager = getSystemService(NotificationManager::class.java)
-		manager?.notify(NOTIFICATION_ID, getNotification(text))
+		getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, getNotification(text))
 	}
 
-	/**
-	 * Background initialization: checks context.filesDir.resolve("model"),
-	 * extracts model zip from assets if necessary, and initializes Vosk.
-	 */
-	private fun initializePipeline() {
+	private fun initializeEngine() {
 		serviceScope.launch(Dispatchers.IO) {
 			try {
-				val modelDir = filesDir.resolve("model")
-				Log.d("LucyVoice", "Checking model directory at: ${modelDir.absolutePath}")
-
+				val modelDir = filesDir.resolve("model_en_in")
 				if (!modelDir.exists() || modelDir.listFiles().isNullOrEmpty()) {
-					notifyStatus("Extracting voice model...")
-					Log.d("LucyVoice", "Model dir empty. Starting extraction from assets...")
-					extractModelFromAssets(modelDir)
+					notifyStatus("Extracting en-IN voice model...")
+					extractModelFromAssets("vosk-model-small-en-in-0.4.zip", modelDir)
 				}
 
-				// Find model root directory (in case zip extracted into a subfolder)
 				val actualModelPath = getActualModelDir(modelDir)
-				Log.d("LucyVoice", "Initializing Vosk Model with path: ${actualModelPath.absolutePath}")
-
 				model = Model(actualModelPath.absolutePath)
 				recognizer = Recognizer(model, SAMPLE_RATE.toFloat())
 
-				Log.d("LucyVoice", "Vosk Model & Recognizer initialized successfully")
-				notifyStatus("Listening...")
-
+				notifyStatus("Listening for 'Lucy' / 'లూసీ'...")
 				startListeningLoop()
 
 			} catch (e: Exception) {
-				Log.e("LucyVoice", "Failed to initialize Vosk model pipeline", e)
-				Timber.e(e, "Failed to initialize Vosk model pipeline")
-				notifyStatus("Model Init Failed: ${e.message}")
+				Log.e("LucyVoice", "Failed to initialize voice engine", e)
+				notifyStatus("Init Failed: ${e.message}")
 			}
 		}
 	}
 
-	/**
-	 * Extracts app/src/main/assets/vosk/model-en-us.zip into context.filesDir/model.
-	 */
-	private fun extractModelFromAssets(targetDir: File) {
+	private fun extractModelFromAssets(assetName: String, targetDir: File) {
 		targetDir.mkdirs()
-
-		val assetPath = "vosk/model-en-us.zip"
 		val inputStream: InputStream = try {
-			assets.open(assetPath)
+			assets.open("vosk/$assetName")
 		} catch (e: Exception) {
-			Log.e("LucyVoice", "Could not open asset at '$assetPath', trying fallback 'model-en-us.zip'", e)
-			assets.open("model-en-us.zip")
+			assets.open(assetName)
 		}
 
 		ZipInputStream(inputStream).use { zipInput ->
@@ -205,120 +181,72 @@ class VoiceCommandService : Service() {
 				entry = zipInput.nextEntry
 			}
 		}
-		Log.d("LucyVoice", "Extraction complete into: ${targetDir.absolutePath}")
 	}
 
-	/**
-	 * Helper to locate folder containing Vosk model files (am, conf, etc.)
-	 */
 	private fun getActualModelDir(baseDir: File): File {
-		if (File(baseDir, "conf").exists() || File(baseDir, "am").exists()) {
-			return baseDir
-		}
+		if (File(baseDir, "conf").exists() || File(baseDir, "am").exists()) return baseDir
 		baseDir.listFiles()?.forEach { child ->
-			if (child.isDirectory) {
-				if (File(child, "conf").exists() || File(child, "am").exists()) {
-					return child
-				}
+			if (child.isDirectory && (File(child, "conf").exists() || File(child, "am").exists())) {
+				return child
 			}
 		}
 		return baseDir
 	}
 
-	/**
-	 * Continuous AudioRecord read loop streaming mic audio into Vosk Recognizer.
-	 */
 	@SuppressLint("MissingPermission")
 	private fun startListeningLoop() {
 		if (isListening) return
 		val rec = recognizer ?: return
-
 		isListening = true
-		Log.d("LucyVoice", "Starting AudioRecord microphone loop...")
 
-		val minBufferSize = AudioRecord.getMinBufferSize(
-			SAMPLE_RATE,
-			AudioFormat.CHANNEL_IN_MONO,
-			AudioFormat.ENCODING_PCM_16BIT
-		)
-		val bufferSize = maxOf(minBufferSize, 8192)
+		val minBufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
 		val buffer = ShortArray(4096)
 
 		try {
-			val record = AudioRecord(
-				MediaRecorder.AudioSource.MIC,
-				SAMPLE_RATE,
-				AudioFormat.CHANNEL_IN_MONO,
-				AudioFormat.ENCODING_PCM_16BIT,
-				bufferSize
-			)
+			val record = AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minBufferSize, 8192))
 			audioRecord = record
-
-			if (record.state != AudioRecord.STATE_INITIALIZED) {
-				Log.e("LucyVoice", "AudioRecord initialization failed")
-				isListening = false
-				notifyStatus("Mic Init Failed")
-				return
-			}
-
 			record.startRecording()
-			Log.d("LucyVoice", "AudioRecord successfully started recording")
 
 			while (isListening && serviceScope.isActive) {
 				val readSamples = record.read(buffer, 0, buffer.size)
 				if (readSamples > 0) {
 					if (rec.acceptWaveForm(buffer, readSamples)) {
 						val jsonResult = rec.result
-						Log.d("LucyVoice", "Vosk Recognizer Result JSON: $jsonResult")
 						processVoskJson(jsonResult)
 					}
 				}
 			}
-
-			try {
-				record.stop()
-			} catch (e: Exception) {
-				Timber.e(e, "Error stopping AudioRecord")
-			}
+			record.stop()
 			record.release()
 			audioRecord = null
-
 		} catch (e: Exception) {
-			Log.e("LucyVoice", "Error in AudioRecord loop", e)
-			Timber.e(e, "Error in AudioRecord loop")
+			Log.e("LucyVoice", "Error in audio record loop", e)
 		} finally {
 			isListening = false
 		}
 	}
 
-	/**
-	 * Parse JSON returned by Vosk recognizer and execute command if wake word "lucy" is detected.
-	 */
 	private fun processVoskJson(jsonResult: String?) {
 		if (jsonResult.isNullOrEmpty()) return
-
 		try {
-			val jsonObject = JSONObject(jsonResult)
-			val rawText = jsonObject.optString("text", "").lowercase().trim()
+			val json = JSONObject(jsonResult)
+			val text = json.optString("text", "").lowercase().trim()
+			if (text.isEmpty()) return
 
-			if (rawText.isEmpty()) return
+			Log.d("LucyVoice", "Heard text: $text")
+			notifyStatus("Heard: $text")
 
-			Log.d("LucyVoice", "Heard text: $rawText")
-			notifyStatus("Heard: $rawText")
+			if (text.contains("lucy") || text.contains("లూసీ")) {
+				val keyword = if (text.contains("lucy")) "lucy" else "లూసీ"
+				val index = text.indexOf(keyword)
+				val command = text.substring(index + keyword.length).trim().removePrefix(",").trim()
 
-			if (rawText.contains("lucy")) {
-				val index = rawText.indexOf("lucy")
-				val command = rawText.substring(index + "lucy".length)
-					.trim()
-					.removePrefix(",")
-					.removePrefix("-")
-					.trim()
-
-				Log.d("LucyVoice", "Parsed Command: '$command'")
+				Log.d("LucyVoice", "Wake word matched! Command: '$command'")
+				notifyStatus("Executing: $command")
 
 				mainHandler.post {
-					notifyStatus("Executing: $command")
-					executor.execute(applicationContext, command)
+					val accessibilityService = AutomationAccessibilityService.instance
+					commandRouter.routeCommand(command, accessibilityService)
 				}
 
 				mainHandler.postDelayed({
@@ -326,7 +254,7 @@ class VoiceCommandService : Service() {
 				}, 3500)
 			}
 		} catch (e: Exception) {
-			Log.e("LucyVoice", "Failed to parse Vosk result JSON", e)
+			Log.e("LucyVoice", "Error processing Vosk json", e)
 		}
 	}
 
@@ -347,7 +275,5 @@ class VoiceCommandService : Service() {
 		recognizer?.close()
 		model?.close()
 		serviceScope.cancel()
-		Log.d("LucyVoice", "VoiceCommandService destroyed")
-		Timber.d("VoiceCommandService destroyed")
 	}
 }
