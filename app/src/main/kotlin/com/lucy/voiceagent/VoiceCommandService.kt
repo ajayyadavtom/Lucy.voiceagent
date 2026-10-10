@@ -8,6 +8,9 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.os.Binder
 import android.os.Build
 import android.os.Handler
@@ -19,33 +22,34 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import org.vosk.LibVosk
 import org.vosk.LogLevel
 import org.vosk.Model
 import org.vosk.Recognizer
-import org.vosk.android.RecognitionListener
-import org.vosk.android.SpeechService
 import timber.log.Timber
 import java.io.File
 
 /**
  * ForegroundService for continuous voice listening.
- * Uses Vosk SpeechService for offline STT and routes commands to VoiceCommandExecutor.
+ * Directly reads microphone PCM audio via AudioRecord and passes wave forms to Vosk Recognizer.
  */
-class VoiceCommandService : Service(), RecognitionListener {
+class VoiceCommandService : Service() {
 
 	private val binder = LocalBinder()
-	private var speechService: SpeechService? = null
 	private var recognizer: Recognizer? = null
 	private var model: Model? = null
+	private var audioRecord: AudioRecord? = null
+
+	@Volatile
+	private var isListening = false
 
 	private val serviceScope = CoroutineScope(Dispatchers.Default + Job())
 	private val mainHandler = Handler(Looper.getMainLooper())
 
 	private lateinit var executor: VoiceCommandExecutor
-	private lateinit var speakerVerifier: SpeakerVerifier
 
 	private val notificationManager: NotificationManager by lazy {
 		getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -56,6 +60,7 @@ class VoiceCommandService : Service(), RecognitionListener {
 		private const val NOTIFICATION_ID = 1001
 		private const val MODEL_DIR = "vosk_model"
 		private const val MODEL_FILE = "model-en-us"
+		private const val SAMPLE_RATE = 16000
 	}
 
 	inner class LocalBinder : Binder() {
@@ -67,16 +72,16 @@ class VoiceCommandService : Service(), RecognitionListener {
 		Timber.d("VoiceCommandService created")
 
 		LibVosk.setLogLevel(LogLevel.INFO)
-		executor = VoiceCommandExecutor(this)
-		speakerVerifier = SpeakerVerifier(this)
+		executor = VoiceCommandExecutor()
 
 		createNotificationChannel()
 		initializeVosk()
 	}
 
 	override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-		Timber.d("VoiceCommandService started")
+		Timber.d("VoiceCommandService onStartCommand")
 		if (intent?.action == "STOP_SERVICE") {
+			stopListening()
 			stopSelf()
 			return START_NOT_STICKY
 		}
@@ -104,7 +109,7 @@ class VoiceCommandService : Service(), RecognitionListener {
 	/**
 	 * Create foreground notification.
 	 */
-	private fun getNotification(status: String = "Listening"): Notification {
+	private fun getNotification(status: String = "Listening for 'Lucy'..."): Notification {
 		val stopIntent = Intent(this, VoiceCommandService::class.java).apply {
 			action = "STOP_SERVICE"
 		}
@@ -125,10 +130,10 @@ class VoiceCommandService : Service(), RecognitionListener {
 	}
 
 	/**
-	 * Initialize Vosk model, recognizer, and speech service.
+	 * Initialize Vosk model and recognizer.
 	 */
 	private fun initializeVosk() {
-		serviceScope.launch {
+		serviceScope.launch(Dispatchers.IO) {
 			try {
 				val modelDir = File(cacheDir, MODEL_DIR)
 				val modelPath = File(modelDir, MODEL_FILE)
@@ -139,12 +144,13 @@ class VoiceCommandService : Service(), RecognitionListener {
 				}
 
 				model = Model(modelPath.absolutePath)
-				recognizer = Recognizer(model, 16000f)
+				recognizer = Recognizer(model, SAMPLE_RATE.toFloat())
 
 				Timber.i("Vosk model loaded successfully")
-				startForeground(NOTIFICATION_ID, getNotification("Listening for 'Lucy'..."))
+				Log.d("LucyVoice", "Vosk model loaded successfully")
 
 				mainHandler.post {
+					startForeground(NOTIFICATION_ID, getNotification("Listening for 'Lucy'..."))
 					startListening()
 				}
 
@@ -215,112 +221,128 @@ class VoiceCommandService : Service(), RecognitionListener {
 	}
 
 	/**
-	 * Start speech service listening for audio input.
+	 * Start recording audio from microphone in a background thread and feeding Vosk recognizer.
 	 */
+	@SuppressLint("MissingPermission")
 	private fun startListening() {
-		try {
-			if (recognizer != null) {
-				if (speechService == null) {
-					speechService = SpeechService(recognizer, 16000f)
+		if (isListening) return
+		val rec = recognizer ?: return
+
+		isListening = true
+		Log.d("LucyVoice", "Audio recording thread started. Listening for wake word 'Lucy'...")
+
+		serviceScope.launch(Dispatchers.IO) {
+			val minBufferSize = AudioRecord.getMinBufferSize(
+				SAMPLE_RATE,
+				AudioFormat.CHANNEL_IN_MONO,
+				AudioFormat.ENCODING_PCM_16BIT
+			)
+			val bufferSize = maxOf(minBufferSize, 8192)
+			val buffer = ShortArray(4096)
+
+			try {
+				val record = AudioRecord(
+					MediaRecorder.AudioSource.MIC,
+					SAMPLE_RATE,
+					AudioFormat.CHANNEL_IN_MONO,
+					AudioFormat.ENCODING_PCM_16BIT,
+					bufferSize
+				)
+				audioRecord = record
+
+				if (record.state != AudioRecord.STATE_INITIALIZED) {
+					Log.e("LucyVoice", "AudioRecord initialization failed")
+					isListening = false
+					return@launch
 				}
-				speechService?.startListening(this)
-				Timber.i("SpeechService listening started")
-				Log.d("LucyVoice", "SpeechService active and listening")
-				updateNotification("Listening for 'Lucy'...")
+
+				record.startRecording()
+				Log.d("LucyVoice", "AudioRecord started recording")
+
+				while (isListening && isActive) {
+					val readSamples = record.read(buffer, 0, buffer.size)
+					if (readSamples > 0) {
+						if (rec.acceptWaveForm(buffer, readSamples)) {
+							val jsonResult = rec.result
+							processVoskResult(jsonResult)
+						}
+					}
+				}
+
+				try {
+					record.stop()
+				} catch (e: Exception) {
+					Timber.e(e, "Error stopping AudioRecord")
+				}
+				record.release()
+				audioRecord = null
+
+			} catch (e: Exception) {
+				Log.e("LucyVoice", "Audio recording loop error", e)
+				Timber.e(e, "Audio recording loop error")
+			} finally {
+				isListening = false
+			}
+		}
+	}
+
+	/**
+	 * Stop microphone audio recording loop.
+	 */
+	private fun stopListening() {
+		isListening = false
+		try {
+			audioRecord?.stop()
+			audioRecord?.release()
+			audioRecord = null
+		} catch (e: Exception) {
+			Timber.e(e, "Error releasing AudioRecord")
+		}
+	}
+
+	/**
+	 * Parse Vosk JSON result, check for wake word 'lucy', and pass remaining command to executor.
+	 */
+	private fun processVoskResult(jsonResult: String?) {
+		if (jsonResult.isNullOrEmpty()) return
+
+		try {
+			val jsonObject = JSONObject(jsonResult)
+			val rawText = jsonObject.optString("text", "").lowercase().trim()
+
+			if (rawText.isEmpty()) return
+
+			Log.d("LucyVoice", "Heard text: $rawText")
+
+			if (rawText.contains("lucy")) {
+				val index = rawText.indexOf("lucy")
+				val command = rawText.substring(index + "lucy".length)
+					.trim()
+					.removePrefix(",")
+					.removePrefix("-")
+					.trim()
+
+				Log.d("LucyVoice", "Final Command: $command")
+
+				if (command.isNotEmpty()) {
+					mainHandler.post {
+						updateNotification("Command: $command")
+						val executed = executor.executeCommand(this@VoiceCommandService, command)
+						if (executed) {
+							updateNotification("Launched: $command")
+						} else {
+							updateNotification("Not found: $command")
+						}
+					}
+				}
 			}
 		} catch (e: Exception) {
-			Timber.e(e, "Failed to start SpeechService")
-			Log.e("LucyVoice", "Error starting SpeechService", e)
+			Log.e("LucyVoice", "Error parsing Vosk result JSON", e)
 		}
 	}
 
 	/**
-	 * Helper to extract spoken text from Vosk JSON response.
-	 */
-	private fun parseVoskText(hypothesis: String?): String {
-		if (hypothesis.isNullOrEmpty()) return ""
-		return try {
-			val jsonObject = JSONObject(hypothesis)
-			if (jsonObject.has("text")) {
-				jsonObject.getString("text")
-			} else if (jsonObject.has("partial")) {
-				jsonObject.getString("partial")
-			} else {
-				""
-			}
-		} catch (e: Exception) {
-			""
-		}
-	}
-
-	override fun onPartialResult(hypothesis: String?) {
-		val text = parseVoskText(hypothesis).trim()
-		if (text.isNotEmpty()) {
-			Timber.d("Partial result: $text")
-		}
-	}
-
-	override fun onResult(hypothesis: String?) {
-		val text = parseVoskText(hypothesis).trim()
-		if (text.isNotEmpty()) {
-			Log.d("LucyVoice", "Heard: $text")
-			Timber.i("Recognition result: $text")
-			mainHandler.post {
-				processVoiceCommand(text)
-			}
-		}
-	}
-
-	override fun onFinalResult(hypothesis: String?) {
-		val text = parseVoskText(hypothesis).trim()
-		if (text.isNotEmpty()) {
-			Log.d("LucyVoice", "Heard: $text")
-			Timber.i("Final result: $text")
-			mainHandler.post {
-				processVoiceCommand(text)
-			}
-		}
-	}
-
-	override fun onError(exception: Exception?) {
-		Timber.e(exception, "Recognition error")
-		Log.e("LucyVoice", "Recognition error", exception)
-		mainHandler.post {
-			updateNotification("Listening...")
-		}
-	}
-
-	override fun onTimeout() {
-		Timber.i("Recognition timeout")
-		mainHandler.post {
-			updateNotification("Listening for 'Lucy'...")
-		}
-	}
-
-	/**
-	 * Process recognized text and pass to VoiceCommandExecutor.
-	 */
-	private fun processVoiceCommand(voiceText: String) {
-		Timber.i("Processing command: $voiceText")
-
-		val commandExecuted = executor.executeCommand(voiceText) { confirmationPrompt ->
-			Timber.i("Confirmation required: $confirmationPrompt")
-			updateNotification("Awaiting confirmation: $confirmationPrompt")
-		}
-
-		if (commandExecuted) {
-			updateNotification("Executed: $voiceText")
-		} else {
-			updateNotification("Command not recognized")
-		}
-
-		mainHandler.postDelayed({
-			updateNotification("Listening for 'Lucy'...")
-		}, 2500)
-	}
-
-	/**
-	 * Update the foreground notification.
+	 * Update the foreground notification text.
 	 */
 	private fun updateNotification(status: String) {
 		notificationManager.notify(NOTIFICATION_ID, getNotification(status))
@@ -329,11 +351,10 @@ class VoiceCommandService : Service(), RecognitionListener {
 	override fun onDestroy() {
 		super.onDestroy()
 		Timber.d("VoiceCommandService destroyed")
-		speechService?.stop()
-		speechService?.shutdown()
+		Log.d("LucyVoice", "VoiceCommandService destroyed")
+		stopListening()
 		recognizer?.close()
 		model?.close()
-		speakerVerifier.release()
 		serviceScope.cancel()
 	}
 }

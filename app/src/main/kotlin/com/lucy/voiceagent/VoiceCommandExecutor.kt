@@ -8,77 +8,58 @@ import android.view.KeyEvent
 import timber.log.Timber
 
 /**
- * Safe intent mapper: routes recognized speech to allowed actions or app launches.
- * Bypasses speaker verification for basic app launches (Spotify, YouTube, Chrome, Gmail, etc.).
+ * Safe intent mapper: routes recognized speech to actual Android Intents to launch apps.
+ * Bypasses speaker verification for basic app launches (YouTube, Spotify, Chrome, Gmail, Maps, etc.).
  */
-class VoiceCommandExecutor(private val context: Context) {
-
-	private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+class VoiceCommandExecutor {
 
 	/**
-	 * Map voice text to an intent-based action.
-	 * Returns true if command was recognized and executed.
+	 * Map spoken command string to actual Android Intent and launch the app.
+	 * Includes Intent.FLAG_ACTIVITY_NEW_TASK flag so it can be launched from a Service.
 	 */
-	fun executeCommand(voiceText: String, onRequiresConfirmation: ((String) -> Unit)? = null): Boolean {
-		var text = voiceText.lowercase().trim()
+	fun executeCommand(context: Context, command: String): Boolean {
+		val text = command.lowercase().trim()
 
-		// Strip wake word prefixes ("hey lucy", "ok lucy", "hello lucy", "lucy")
-		val wakeWords = listOf("hey lucy", "ok lucy", "hello lucy", "lucy")
-		for (wakeWord in wakeWords) {
-			if (text.startsWith(wakeWord)) {
-				text = text.substring(wakeWord.length).trim()
-				// Remove punctuation like leading comma
-				if (text.startsWith(",")) {
-					text = text.substring(1).trim()
-				}
-				break
-			}
-		}
-
-		Log.d("LucyVoice", "Executor received command: '$text' (raw: '$voiceText')")
-		Timber.d("Executing processed command: '$text' (raw: '$voiceText')")
+		Log.d("LucyVoice", "VoiceCommandExecutor received command: '$text'")
+		Timber.d("Executing command: '$text'")
 
 		return when {
-			// Specific App Launching Intents (Bypasses verification)
-			text.contains("open spotify") -> launchApp("com.spotify.music")
-			text.contains("open youtube") -> launchApp("com.google.android.youtube")
-			text.contains("open chrome") -> launchApp("com.android.chrome")
-			text.contains("open gmail") -> launchApp("com.google.android.gm")
-			text.contains("open maps") -> launchApp("com.google.android.apps.maps")
-			text.contains("open calculator") -> launchApp("com.android.calculator2")
-			text.contains("open settings") -> launchApp("com.android.settings")
+			// YouTube
+			text.contains("open youtube") -> launchApp(context, "com.google.android.youtube")
 
-			// Dynamic app lookup (Bypasses verification)
+			// Spotify
+			text.contains("open spotify") -> launchApp(context, "com.spotify.music")
+
+			// Chrome
+			text.contains("open chrome") -> launchApp(context, "com.android.chrome")
+
+			// Gmail
+			text.contains("open gmail") -> launchApp(context, "com.google.android.gm")
+
+			// Maps
+			text.contains("open maps") -> launchApp(context, "com.google.android.apps.maps")
+
+			// Calculator
+			text.contains("open calculator") -> launchApp(context, "com.android.calculator2")
+
+			// Settings
+			text.contains("open settings") -> launchApp(context, "com.android.settings")
+
+			// General launcher for any installed app by name ("open instagram", "open camera", etc.)
 			text.startsWith("open ") -> {
 				val appQuery = text.removePrefix("open ").trim()
-				launchAppByQuery(appQuery)
+				launchAppByQuery(context, appQuery)
 			}
 
-			// Media Controls (Bypasses verification)
-			text.contains("play") -> sendMediaKeyEvent(KeyEvent.KEYCODE_MEDIA_PLAY)
-			text.contains("pause") -> sendMediaKeyEvent(KeyEvent.KEYCODE_MEDIA_PAUSE)
-			text.contains("next") -> sendMediaKeyEvent(KeyEvent.KEYCODE_MEDIA_NEXT)
-			text.contains("previous") || text.contains("prev") -> sendMediaKeyEvent(KeyEvent.KEYCODE_MEDIA_PREVIOUS)
-
-			// Sensitive commands (Requires verification/confirmation)
-			text.contains("shutdown") -> {
-				onRequiresConfirmation?.invoke("confirm shutdown")
-				true
-			}
-
-			text.contains("reboot") || text.contains("restart") -> {
-				onRequiresConfirmation?.invoke("confirm reboot")
-				true
-			}
-
-			text.contains("lock") || text.contains("lock screen") -> {
-				onRequiresConfirmation?.invoke("confirm lock")
-				true
-			}
+			// Media Control Intents
+			text.contains("play") -> sendMediaKeyEvent(context, KeyEvent.KEYCODE_MEDIA_PLAY)
+			text.contains("pause") -> sendMediaKeyEvent(context, KeyEvent.KEYCODE_MEDIA_PAUSE)
+			text.contains("next") -> sendMediaKeyEvent(context, KeyEvent.KEYCODE_MEDIA_NEXT)
+			text.contains("previous") || text.contains("prev") -> sendMediaKeyEvent(context, KeyEvent.KEYCODE_MEDIA_PREVIOUS)
 
 			else -> {
-				Log.d("LucyVoice", "Unrecognized command: '$text'")
-				Timber.w("Unknown command: $text")
+				Log.d("LucyVoice", "Command not mapped: '$text'")
+				Timber.w("Unrecognized command: '$text'")
 				false
 			}
 		}
@@ -87,7 +68,7 @@ class VoiceCommandExecutor(private val context: Context) {
 	/**
 	 * Search installed apps dynamically by query (e.g., "youtube", "instagram", "camera") and launch.
 	 */
-	private fun launchAppByQuery(query: String): Boolean {
+	private fun launchAppByQuery(context: Context, query: String): Boolean {
 		if (query.isBlank()) return false
 		try {
 			val pm = context.packageManager
@@ -99,9 +80,9 @@ class VoiceCommandExecutor(private val context: Context) {
 				val appLabel = info.loadLabel(pm).toString().lowercase()
 				if (appLabel.contains(query) || query.contains(appLabel)) {
 					val packageName = info.activityInfo.packageName
-					Log.d("LucyVoice", "Found app matching '$query': $packageName ($appLabel)")
+					Log.d("LucyVoice", "Found app matching query '$query': $packageName ($appLabel)")
 					Timber.i("Found app matching query '$query': $packageName ($appLabel)")
-					return launchApp(packageName)
+					return launchApp(context, packageName)
 				}
 			}
 			Log.w("LucyVoice", "No installed app found matching query: '$query'")
@@ -115,19 +96,19 @@ class VoiceCommandExecutor(private val context: Context) {
 	}
 
 	/**
-	 * Launch app by package name. Returns true if app found.
+	 * Launch app by package name using getLaunchIntentForPackage with FLAG_ACTIVITY_NEW_TASK.
 	 */
-	private fun launchApp(packageName: String): Boolean {
+	private fun launchApp(context: Context, packageName: String): Boolean {
 		return try {
 			val intent = context.packageManager.getLaunchIntentForPackage(packageName)
 			if (intent != null) {
-				intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+				intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 				context.startActivity(intent)
 				Log.d("LucyVoice", "Successfully launched app: $packageName")
 				Timber.i("Launched app: $packageName")
 				true
 			} else {
-				Log.w("LucyVoice", "App package not installed on device: $packageName")
+				Log.w("LucyVoice", "App not installed on device: $packageName")
 				Timber.w("App not found: $packageName")
 				false
 			}
@@ -141,8 +122,9 @@ class VoiceCommandExecutor(private val context: Context) {
 	/**
 	 * Dispatch a media key event.
 	 */
-	private fun sendMediaKeyEvent(keyCode: Int): Boolean {
+	private fun sendMediaKeyEvent(context: Context, keyCode: Int): Boolean {
 		return try {
+			val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 			audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
 			audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
 			Log.d("LucyVoice", "Dispatched media key event: $keyCode")
@@ -160,8 +142,8 @@ class VoiceCommandExecutor(private val context: Context) {
 	 */
 	fun getWhitelistedApps(): List<String> {
 		return listOf(
-			"Spotify",
 			"YouTube",
+			"Spotify",
 			"Chrome",
 			"Gmail",
 			"Maps",
