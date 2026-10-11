@@ -41,12 +41,11 @@
 			</intent-filter>
 		</activity>
 
-		<!-- Foreground Service -->
+		<!-- Floating Bubble Overlay Service -->
 		<service
-			android:name=".VoiceCommandService"
+			android:name=".FloatingBubbleService"
 			android:enabled="true"
-			android:exported="false"
-			android:foregroundServiceType="microphone" />
+			android:exported="false" />
 
 		<!-- Quick Settings Tile Service -->
 		<service
@@ -74,37 +73,11 @@
 				android:resource="@xml/accessibility_service_config" />
 		</service>
 
-		<!-- Floating Bubble Overlay Service -->
 		<service
-			android:name=".FloatingBubbleService"
+			android:name=".VoiceCommandService"
 			android:enabled="true"
-			android:exported="false" />
-
-		<service
-			android:name=".AccessibilityHelper"
-			android:enabled="false"
 			android:exported="false"
-			android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-			<intent-filter>
-				<action android:name="android.accessibilityservice.AccessibilityService" />
-			</intent-filter>
-			<meta-data
-				android:name="android.accessibilityservice"
-				android:resource="@xml/accessibility_service_config" />
-		</service>
-
-		<receiver
-			android:name=".DeviceAdminReceiver"
-			android:enabled="false"
-			android:exported="true"
-			android:permission="android.permission.BIND_DEVICE_ADMIN">
-			<intent-filter>
-				<action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
-			</intent-filter>
-			<meta-data
-				android:name="android.app.device_admin"
-				android:resource="@xml/device_admin_receiver" />
-		</receiver>
+			android:foregroundServiceType="microphone" />
 
 	</application>
 

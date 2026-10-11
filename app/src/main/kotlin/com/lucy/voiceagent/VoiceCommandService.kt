@@ -291,7 +291,8 @@ class VoiceCommandService : Service() {
 				Log.d("LucyVoice", "Uploading WAV audio to Sarvam STT API...")
 				notifyStatus("Transcribing via Sarvam AI...")
 
-				val transcript = SarvamApiClient.transcribeAudio(wavFile, "en-IN")
+				val sttResult = SarvamApiClient.transcribe(wavFile, "en-IN")
+				val transcript = sttResult?.first
 
 				withContext(Dispatchers.Main) {
 					if (!transcript.isNullOrEmpty()) {
