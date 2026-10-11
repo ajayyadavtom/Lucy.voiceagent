@@ -49,10 +49,14 @@ dependencies {
 	implementation("androidx.appcompat:appcompat:1.6.1")
 	implementation("com.google.android.material:material:1.10.0")
 	implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+	implementation("androidx.cardview:cardview:1.0.0")
 
 	// Kotlin & Coroutines
 	implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 	implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
+
+	// Google Generative AI (Gemini 1.5 Flash)
+	implementation("com.google.ai.client.generativeai:generativeai:0.2.2")
 
 	// Retrofit & OkHttp for Sarvam AI API
 	implementation("com.squareup.retrofit2:retrofit:2.9.0")

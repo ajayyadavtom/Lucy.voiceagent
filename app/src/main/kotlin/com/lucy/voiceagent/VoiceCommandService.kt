@@ -19,6 +19,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -36,9 +37,9 @@ import java.io.FileOutputStream
 import java.util.Locale
 
 /**
- * Foreground Service using Android native SpeechRecognizer for lightweight offline wake-word ("lucy" / "లూసీ") detection.
- * On wake word: plays an audio beep tone, records 5 seconds of audio via AudioRecord, uploads to Sarvam AI STT (`saaras:v4`),
- * and executes command.
+ * Foreground Service holding a PARTIAL_WAKE_LOCK for screen-off voice listening.
+ * Uses native SpeechRecognizer for wake-word ("lucy" / "లూసీ") with strict mutex locking,
+ * plays a ToneGenerator beep, records 5 seconds of audio via AudioRecord, and transcribes via Sarvam STT.
  */
 class VoiceCommandService : Service() {
 
@@ -50,12 +51,16 @@ class VoiceCommandService : Service() {
 	private var statusListener: StatusListener? = null
 
 	private var speechRecognizer: SpeechRecognizer? = null
+	private var wakeLock: PowerManager.WakeLock? = null
 	private val serviceScope = CoroutineScope(Dispatchers.Default + Job())
 	private val mainHandler = Handler(Looper.getMainLooper())
 	private lateinit var commandRouter: CommandRouter
 
 	@Volatile
 	private var isProcessingCommand = false
+
+	@Volatile
+	private var isListening = false
 
 	companion object {
 		private const val CHANNEL_ID = "VoiceCommandServiceChannel"
@@ -71,6 +76,12 @@ class VoiceCommandService : Service() {
 		super.onCreate()
 		Log.d("LucyVoice", "VoiceCommandService created")
 		commandRouter = CommandRouter(this)
+
+		val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+		wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LucyVoiceAgent::WakeLock").apply {
+			acquire()
+		}
+		Log.d("LucyVoice", "PARTIAL_WAKE_LOCK acquired for screen-off voice listening")
 
 		createNotificationChannel()
 		startForeground(NOTIFICATION_ID, getNotification("Listening for 'Lucy'..."))
@@ -135,15 +146,19 @@ class VoiceCommandService : Service() {
 		mainHandler.post {
 			try {
 				if (SpeechRecognizer.isRecognitionAvailable(this)) {
+					speechRecognizer?.destroy()
 					speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
 					speechRecognizer?.setRecognitionListener(object : RecognitionListener {
-						override fun onReadyForSpeech(params: Bundle?) {}
+						override fun onReadyForSpeech(params: Bundle?) {
+							isListening = true
+						}
 						override fun onBeginningOfSpeech() {}
 						override fun onRmsChanged(rmsdB: Float) {}
 						override fun onBufferReceived(buffer: ByteArray?) {}
 						override fun onEndOfSpeech() {}
 
 						override fun onError(error: Int) {
+							isListening = false
 							Log.d("LucyVoice", "Native SpeechRecognizer error code: $error")
 							if (!isProcessingCommand) {
 								mainHandler.postDelayed({ restartWakeWordListening() }, 1000)
@@ -151,6 +166,9 @@ class VoiceCommandService : Service() {
 						}
 
 						override fun onResults(results: Bundle?) {
+							isListening = false
+							if (isProcessingCommand) return
+
 							val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
 							if (!matches.isNullOrEmpty()) {
 								val heardText = matches[0].lowercase(Locale.ROOT)
@@ -158,7 +176,7 @@ class VoiceCommandService : Service() {
 
 								if (heardText.contains("lucy") || heardText.contains("లూసీ")) {
 									Log.d("LucyVoice", "Wake word matched! Triggering command capture...")
-									onWakeWordDetected(heardText)
+									onWakeWordDetected()
 									return
 								}
 							}
@@ -168,13 +186,13 @@ class VoiceCommandService : Service() {
 						}
 
 						override fun onPartialResults(partialResults: Bundle?) {
+							if (isProcessingCommand) return
 							val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
 							if (!matches.isNullOrEmpty()) {
 								val partial = matches[0].lowercase(Locale.ROOT)
 								if (partial.contains("lucy") || partial.contains("లూసీ")) {
 									Log.d("LucyVoice", "Wake word detected in partial result: $partial")
-									speechRecognizer?.stopListening()
-									onWakeWordDetected(partial)
+									onWakeWordDetected()
 								}
 							}
 						}
@@ -195,7 +213,7 @@ class VoiceCommandService : Service() {
 	}
 
 	private fun restartWakeWordListening() {
-		if (isProcessingCommand) return
+		if (isProcessingCommand || isListening) return
 		try {
 			val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
 				putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -208,9 +226,16 @@ class VoiceCommandService : Service() {
 		}
 	}
 
-	private fun onWakeWordDetected(heardText: String) {
+	private fun onWakeWordDetected() {
+		if (isProcessingCommand) return
 		isProcessingCommand = true
-		speechRecognizer?.stopListening()
+		isListening = false
+
+		try {
+			speechRecognizer?.stopListening()
+		} catch (e: Exception) {
+			Log.e("LucyVoice", "Error stopping SpeechRecognizer", e)
+		}
 
 		notifyStatus("Lucy Activated! Recording command...")
 
@@ -227,7 +252,7 @@ class VoiceCommandService : Service() {
 	@SuppressLint("MissingPermission")
 	private fun captureAudioAndProcessSarvam() {
 		serviceScope.launch(Dispatchers.IO) {
-			val totalSamples = SAMPLE_RATE * 5
+			val totalSamples = SAMPLE_RATE * 5 // 5 seconds
 			val minBufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
 
 			val pcmBuffer = ByteArray(totalSamples * 2)
@@ -297,7 +322,7 @@ class VoiceCommandService : Service() {
 		}
 	}
 
-	private fun pcmToWavFile(rawFile: File, wavFile: File, sampleRate: Int = 16000) {
+	private fun pcmToWavFile(rawFile: File, wavFile: File, sampleRate: Int) {
 		val pcmData = rawFile.readBytes()
 		val totalAudioLen = pcmData.size.toLong()
 		val totalDataLen = totalAudioLen + 36
@@ -360,6 +385,15 @@ class VoiceCommandService : Service() {
 	override fun onDestroy() {
 		super.onDestroy()
 		isProcessingCommand = false
+		isListening = false
+		try {
+			if (wakeLock?.isHeld == true) {
+				wakeLock?.release()
+				Log.d("LucyVoice", "PARTIAL_WAKE_LOCK released")
+			}
+		} catch (e: Exception) {
+			Log.e("LucyVoice", "Error releasing WakeLock", e)
+		}
 		speechRecognizer?.destroy()
 		speechRecognizer = null
 		serviceScope.cancel()
