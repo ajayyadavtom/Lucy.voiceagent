@@ -19,7 +19,6 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.os.PowerManager
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -37,9 +36,8 @@ import java.io.FileOutputStream
 import java.util.Locale
 
 /**
- * Foreground Service holding a PARTIAL_WAKE_LOCK for screen-off voice listening.
- * Uses native SpeechRecognizer for wake-word ("lucy" / "లూసీ") with strict mutex locking,
- * plays a ToneGenerator beep, records 5 seconds of audio via AudioRecord, and transcribes via Sarvam STT.
+ * VoiceCommandService: Persistent Foreground Service with strict concurrency locks (mutex).
+ * Handles wake-word detection, plays alert beep, records 5 seconds audio, and uploads to Sarvam STT.
  */
 class VoiceCommandService : Service() {
 
@@ -51,7 +49,6 @@ class VoiceCommandService : Service() {
 	private var statusListener: StatusListener? = null
 
 	private var speechRecognizer: SpeechRecognizer? = null
-	private var wakeLock: PowerManager.WakeLock? = null
 	private val serviceScope = CoroutineScope(Dispatchers.Default + Job())
 	private val mainHandler = Handler(Looper.getMainLooper())
 	private lateinit var commandRouter: CommandRouter
@@ -76,12 +73,6 @@ class VoiceCommandService : Service() {
 		super.onCreate()
 		Log.d("LucyVoice", "VoiceCommandService created")
 		commandRouter = CommandRouter(this)
-
-		val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-		wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LucyVoiceAgent::WakeLock").apply {
-			acquire()
-		}
-		Log.d("LucyVoice", "PARTIAL_WAKE_LOCK acquired for screen-off voice listening")
 
 		createNotificationChannel()
 		startForeground(NOTIFICATION_ID, getNotification("Listening for 'Lucy'..."))
@@ -142,6 +133,9 @@ class VoiceCommandService : Service() {
 		getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, getNotification(text))
 	}
 
+	/**
+	 * Initialize Android native SpeechRecognizer with a strict mutex lock.
+	 */
 	private fun initNativeWakeWordRecognizer() {
 		mainHandler.post {
 			try {
@@ -226,6 +220,9 @@ class VoiceCommandService : Service() {
 		}
 	}
 
+	/**
+	 * Triggered when wake word "lucy" or "లూసీ" is detected.
+	 */
 	private fun onWakeWordDetected() {
 		if (isProcessingCommand) return
 		isProcessingCommand = true
@@ -239,6 +236,7 @@ class VoiceCommandService : Service() {
 
 		notifyStatus("Lucy Activated! Recording command...")
 
+		// Play alert beep tone
 		try {
 			val toneGen = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100)
 			toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
@@ -387,14 +385,6 @@ class VoiceCommandService : Service() {
 		super.onDestroy()
 		isProcessingCommand = false
 		isListening = false
-		try {
-			if (wakeLock?.isHeld == true) {
-				wakeLock?.release()
-				Log.d("LucyVoice", "PARTIAL_WAKE_LOCK released")
-			}
-		} catch (e: Exception) {
-			Log.e("LucyVoice", "Error releasing WakeLock", e)
-		}
 		speechRecognizer?.destroy()
 		speechRecognizer = null
 		serviceScope.cancel()
